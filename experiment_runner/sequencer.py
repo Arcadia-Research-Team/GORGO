@@ -139,7 +139,7 @@ SEQUENCER_IMAGE = (
     modal.Image.debian_slim()
     .pip_install("httpx")
     .add_local_python_source(
-        "app", "engine", "experiment_runner", "proxy", "policy", "scripts", "utils"
+        "app", "engine", "experiment_runner", "proxy", "scripts", "gorgo"
     )
 )
 

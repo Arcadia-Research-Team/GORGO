@@ -47,7 +47,7 @@ DEFAULT_VOCAB_SIZE = 151643  # gpt-4o / Qwen tokenizer vocab
 image = (
     modal.Image.debian_slim()
     .pip_install("duckdb", "tiktoken", "pyarrow")
-    .add_local_python_source("app", "utils")
+    .add_local_python_source("app", "gorgo")
 )
 
 

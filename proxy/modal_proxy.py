@@ -365,7 +365,7 @@ def _parse_metrics_text(text: str) -> dict[str, float]:
 @app.function(
     image=modal.Image.debian_slim()
     .pip_install("httpx[http2]", "uvicorn", "transformers", "jinja2", "pyarrow", "datasets>=3.0")
-    .add_local_python_source("app", "proxy", "policy", "utils"),
+    .add_local_python_source("app", "proxy", "gorgo"),
     region=REGION,
     timeout=(24 * 60 * 60),
     volumes={

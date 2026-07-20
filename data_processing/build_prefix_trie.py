@@ -33,7 +33,7 @@ from gorgo.radix_trie import RadixTrie
 image = (
     modal.Image.debian_slim()
     .pip_install("duckdb")
-    .add_local_python_source("app", "build_eval_dataset", "utils")
+    .add_local_python_source("app", "build_eval_dataset", "gorgo")
 )
 
 

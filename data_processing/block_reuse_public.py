@@ -45,7 +45,7 @@ from build_hf_prefix_trie import (
 image = (
     modal.Image.debian_slim()
     .pip_install("datasets>=3.0", "pyarrow", "tiktoken")
-    .add_local_python_source("app", "build_eval_dataset", "build_hf_prefix_trie", "utils")
+    .add_local_python_source("app", "build_eval_dataset", "build_hf_prefix_trie", "gorgo")
 )
 
 BLOCK_SIZE = 256

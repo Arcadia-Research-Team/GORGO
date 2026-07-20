@@ -99,7 +99,7 @@ REGION = os.getenv("REGION", "us-east")
 image = (
     modal.Image.debian_slim()
     .pip_install("httpx[http2]", "pyarrow", "datasets>=3.0")
-    .add_local_python_source("app", "proxy", "policy", "utils")
+    .add_local_python_source("app", "proxy", "gorgo")
 )
 
 

@@ -50,7 +50,7 @@ from engine.modal_sglang import (
 PROXY_IMAGE = (
     modal.Image.debian_slim()
     .pip_install("httpx[http2]", "uvicorn", "transformers", "jinja2", "pyarrow", "datasets>=3.0")
-    .add_local_python_source("app", "engine", "proxy", "policy", "utils")
+    .add_local_python_source("app", "engine", "proxy", "gorgo")
 )
 
 
@@ -1419,7 +1419,7 @@ async def _run_sweep_matrix(
 @app.function(
     image=modal.Image.debian_slim()
     .pip_install("httpx")
-    .add_local_python_source("app", "engine", "proxy", "policy", "scripts", "utils"),
+    .add_local_python_source("app", "engine", "proxy", "scripts", "gorgo"),
     volumes={"/results": bench_results_volume},
     timeout=24 * 60 * 60,
 )
