@@ -80,7 +80,7 @@ from datetime import datetime, timezone
 import modal
 
 from app import app, bench_results_volume, completions_volume
-from proxy.measure import (
+from gorgo.measure import (
     flush_replica_cache,
     measure_chat_completion,
     ping_once,

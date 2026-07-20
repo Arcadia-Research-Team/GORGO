@@ -23,7 +23,7 @@ from app import (
     hf_datasets_volume,
     lmsys_chat_1m_volume,
 )
-from proxy.measure import consume_sse_stream
+from gorgo.measure import consume_sse_stream
 
 
 def _ts() -> str:

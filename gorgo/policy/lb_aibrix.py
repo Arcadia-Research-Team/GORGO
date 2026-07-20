@@ -30,10 +30,10 @@ import random
 import statistics
 from typing import TYPE_CHECKING, Callable
 
-from policy.base import PolicyDef, ReplicaSnapshot, RouteDecision, route_random
+from gorgo.policy.base import PolicyDef, ReplicaSnapshot, RouteDecision, route_random
 
 if TYPE_CHECKING:
-    from utils.radix_trie import RadixTrie
+    from gorgo.radix_trie import RadixTrie
 
 
 def _tie_break_min(candidates: list[str], score: Callable[[str], float]) -> str:

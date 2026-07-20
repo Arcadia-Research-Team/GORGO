@@ -1,6 +1,12 @@
-"""Measurement primitives shared by ``proxy/workload.py`` and
-``proxy/calibrate.py`` -- and intentionally framework-free so the proxy can
-import them later for online hyperparameter tuning as real traffic flows.
+"""Measurement primitives shared by the GORGO proxy (``proxy/workload.py``,
+``proxy/calibrate.py``, ``proxy/modal_proxy.py``) and any downstream router --
+intentionally framework-free so online hyperparameter tuning can run wherever
+real traffic flows.
+
+The streaming helpers duck-type their ``client``/``resp`` arguments (anything
+httpx-shaped works: ``resp.aiter_raw()``, ``client.get/post/stream``) so this
+module has **no third-party imports** and stays usable from stdlib-only
+installs of the ``gorgo`` package.
 
 Each helper is a plain function / coroutine with no Modal- or SGLang-
 specific plumbing. Collectively they implement the GORGO calibration
@@ -49,9 +55,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Awaitable, Callable
-
-import httpx
+from typing import Any, Awaitable, Callable
 
 NS_PER_S = 1_000_000_000
 
@@ -115,7 +119,7 @@ def ols_fit(xs: list[float], ys: list[float]) -> dict:
 
 
 async def consume_sse_stream(
-    resp: httpx.Response,
+    resp: Any,
     *,
     request_start_ns: int,
     chunk_sink: Callable[[bytes], Awaitable[None]] | None = None,
@@ -242,7 +246,7 @@ async def consume_sse_stream(
 
 
 async def ping_once(
-    client: httpx.AsyncClient,
+    client: Any,
     *,
     n: int = 3,
     path: str = "/v1/models",
@@ -266,7 +270,7 @@ async def ping_once(
 
 
 async def flush_replica_cache(
-    client: httpx.AsyncClient,
+    client: Any,
     *,
     timeout: float = 60.0,
 ) -> bool:
@@ -280,12 +284,12 @@ async def flush_replica_cache(
     try:
         r = await client.post("/flush_cache", timeout=timeout)
         return r.is_success
-    except httpx.HTTPError:
+    except Exception:
         return False
 
 
 async def measure_chat_completion(
-    client: httpx.AsyncClient,
+    client: Any,
     body: dict,
     *,
     ping_rtt: float,
@@ -321,7 +325,7 @@ async def measure_chat_completion(
                 completion_tokens,
                 _meta_info,
             ) = await consume_sse_stream(resp, request_start_ns=request_start_ns)
-    except httpx.HTTPError:
+    except Exception:
         return None
 
     total_ns = time.perf_counter_ns() - request_start_ns

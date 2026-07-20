@@ -226,6 +226,28 @@ class RadixTrie:
             i += j
         return result
 
+    def remove_endpoint(self, endpoint: str) -> int:
+        """Drop every ``endpoint`` tag in the trie; returns tags removed.
+
+        Used when a replica leaves the fleet: its KV cache is gone, so
+        prefixes tagged with it must stop counting as cached there. The
+        nodes themselves are kept -- other replicas' tags and the
+        sequence counts stay valid. O(nodes); replica churn is rare
+        relative to inserts, so a full sweep is acceptable.
+        """
+        removed = 0
+        stack = [self.root]
+        while stack:
+            node = stack.pop()
+            eps = node.replica_endpoints
+            if eps and endpoint in eps:
+                eps.remove(endpoint)
+                removed += 1
+                if not eps:
+                    node.replica_endpoints = None
+            stack.extend(node.children.values())
+        return removed
+
     def unique_token_count(self) -> int:
         """Total length of all compressed edges = KV-cache footprint after
         perfect prefix sharing."""

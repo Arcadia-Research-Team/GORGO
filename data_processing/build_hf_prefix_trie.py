@@ -78,7 +78,7 @@ import modal
 
 from app import app, hf_datasets_volume, lmsys_chat_1m_volume
 from build_eval_dataset import _content_to_str
-from utils.radix_trie import RadixTrie
+from gorgo.radix_trie import RadixTrie
 
 image = (
     modal.Image.debian_slim()

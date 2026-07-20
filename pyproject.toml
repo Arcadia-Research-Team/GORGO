@@ -1,27 +1,54 @@
 [project]
-name = "GORGO"
-version = "0.1.0"
-requires-python = ">=3.12"
-dependencies = [
-    "asyncio>=4.0.0",
+name = "gorgo"
+version = "0.2.0"
+description = "Prefix-cache-, load-, and network-aware routing for LLM replica fleets, with online weight tuning"
+requires-python = ">=3.11"
+# The shipped package (gorgo/) is stdlib-only by design: routing policies,
+# radix trie, ES tuner, OLS calibration, and SSE measurement all duck-type
+# their transport so downstream routers choose their own HTTP stack.
+dependencies = []
+
+[project.optional-dependencies]
+# The reference proxy (proxy/modal_proxy.py) and its workload/calibration
+# drivers -- not shipped in the wheel, but installable for development.
+proxy = [
+    "httpx>=0.28.1",
+    "modal>=1.4.0",
+    "transformers>=4.48.0",
+    "uvicorn>=0.44.0",
+]
+# Trace building, benchmarking, and paper analysis (data_processing/,
+# experiment_runner/).
+analysis = [
     "duckdb>=1.5.2",
     "guidellm>=0.6.0",
-    "httpx>=0.28.1",
     "matplotlib>=3.9.0",
-    "modal>=1.4.0",
     "numpy>=2.4.4",
     "seaborn>=0.13.0",
     "tiktoken>=0.12.0",
-    "uvicorn>=0.44.0",
 ]
 
 [dependency-groups]
 dev = [
+    "pytest>=8.0",
     "ruff>=0.9.0",
 ]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["gorgo"]
+exclude = ["*_test.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["gorgo"]  # colocated: foo_test.py sits beside foo.py
+python_files = ["*_test.py"]
+pythonpath = ["."]
+
 [tool.ruff]
-target-version = "py312"
+target-version = "py311"
 line-length = 100
 src = ["engine"]
 

@@ -28,7 +28,7 @@ from build_eval_dataset import (
     tokenized_dir,
     tokenized_path_for,
 )
-from utils.radix_trie import RadixTrie
+from gorgo.radix_trie import RadixTrie
 
 image = (
     modal.Image.debian_slim()

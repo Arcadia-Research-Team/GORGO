@@ -11,26 +11,30 @@ relies on:
   + callable).
 * :data:`POLICY_REGISTRY`  -- the single source of truth for the kebab-
   case policy ids the ``/policy`` endpoint accepts. Composed lazily
-  from :data:`policy.lb_aibrix.AIBRIX_POLICIES` and
-  :data:`policy.gorgo.GORGO_POLICIES` plus the tiny ``random`` core
-  policy that lives here.
+  from :data:`gorgo.policy.lb_aibrix.AIBRIX_POLICIES` and
+  :data:`gorgo.policy.gorgo.GORGO_POLICIES` plus the small core
+  policies that live here (``random``, ``session-affinity``).
+* :func:`register_policy`  -- extension hook for downstream apps to add
+  their own policies to the registry without editing this package.
 * :func:`route_random`     -- baseline random pick. Lives here because
   it's used both as a public policy and as a fallback by other modules.
 
-aibrix-derived policies live in :mod:`policy.lb_aibrix`; the GORGO
-policy lives in :mod:`policy.gorgo`. To add a new policy family,
-create a new submodule exposing a ``list[PolicyDef]`` and add it to
-:func:`_ensure_registry` below.
+aibrix-derived policies live in :mod:`gorgo.policy.lb_aibrix`; the GORGO
+policy lives in :mod:`gorgo.policy.gorgo`. To add a new policy family
+inside this package, create a new submodule exposing a
+``list[PolicyDef]`` and add it to :func:`_ensure_registry` below;
+downstream applications use :func:`register_policy` instead.
 """
 
 from __future__ import annotations
 
+import hashlib
 import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 if TYPE_CHECKING:
-    from utils.radix_trie import RadixTrie
+    from gorgo.radix_trie import RadixTrie
 
 
 class RouteDecision(NamedTuple):
@@ -161,9 +165,14 @@ class RouteContext:
     available, the local counter takes over during a stale window.
 
     ``hyperparameters`` carries the structured GORGO hyperparameter
-    store (see :mod:`policy.gorgo` for its shape: ``{"defaults":
+    store (see :mod:`gorgo.policy.gorgo` for its shape: ``{"defaults":
     {...}, "per_target": {url: {...}}}``). Non-GORGO policies don't
     read it.
+
+    ``affinity_key`` is an optional caller-supplied session identifier
+    (e.g. the value of a session-affinity header). Only affinity-style
+    policies read it; ``None`` means the request carried no session
+    identity.
     """
 
     replica_urls: list[str]
@@ -175,6 +184,7 @@ class RouteContext:
     token_ids: list[int]
     request_tokens: int
     hyperparameters: dict[str, Any]
+    affinity_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,20 +210,66 @@ def route_random(replica_urls: list[str]) -> RouteDecision:
     return RouteDecision(target=random.choice(replica_urls))
 
 
+def route_session_affinity(ctx: RouteContext) -> RouteDecision:
+    """Sticky routing by rendezvous (highest-random-weight) hash of
+    ``(affinity_key, url)``.
+
+    Rendezvous hashing is churn-stable: adding or removing a replica
+    remaps only the sessions that hashed to that replica, and a session
+    displaced by a temporarily-absent replica returns to it once it is
+    back in ``replica_urls``. ``blake2b`` (not the process-seeded
+    builtin ``hash``) keeps the pinning deterministic across restarts
+    so a proxy redeploy doesn't shuffle every session's KV locality.
+    """
+    key = ctx.affinity_key
+    if not key:
+        return RouteDecision(route_random(ctx.replica_urls).target, "missing-affinity-key", None)
+    kb = key.encode("utf-8", "surrogatepass")
+
+    def weight(url: str) -> bytes:
+        return hashlib.blake2b(kb + b"\x00" + url.encode(), digest_size=8).digest()
+
+    return RouteDecision(target=max(ctx.replica_urls, key=weight))
+
+
 # ----- Registry assembly ----------------------------------------------------
 #
-# Composition is *lazy* on purpose. ``policy.gorgo`` and
-# ``policy.lb_aibrix`` import ``PolicyDef`` / ``RouteContext`` from
-# this module; if we eagerly imported them at the bottom of this
-# file, importing ``policy.gorgo`` first would hit a half-loaded
-# ``policy.base`` and fail (Python's classic circular-import
+# Composition is *lazy* on purpose. ``gorgo.policy.gorgo`` and
+# ``gorgo.policy.lb_aibrix`` import ``PolicyDef`` / ``RouteContext``
+# from this module; if we eagerly imported them at the bottom of this
+# file, importing ``gorgo.policy.gorgo`` first would hit a half-loaded
+# ``gorgo.policy.base`` and fail (Python's classic circular-import
 # trap). Building the registry on first access sidesteps the
 # ordering entirely: by the time any caller asks for
 # ``POLICY_REGISTRY`` the policy modules have finished loading.
 
 _CORE_POLICIES: list[PolicyDef] = [
     PolicyDef("random", False, lambda c: route_random(c.replica_urls)),
+    PolicyDef("session-affinity", False, route_session_affinity),
 ]
+
+# Policies contributed by downstream applications via ``register_policy``.
+# Kept separate from the built-in families so a registered policy survives
+# even if it lands before the lazy built-in registry is first assembled.
+_EXTERNAL_POLICIES: list[PolicyDef] = []
+
+
+def register_policy(pdef: PolicyDef) -> None:
+    """Add a downstream policy to :data:`POLICY_REGISTRY`.
+
+    The name is normalized and must not collide with any built-in or
+    previously-registered policy. Safe to call before or after the lazy
+    registry has been assembled -- the cache is invalidated so the next
+    ``POLICY_REGISTRY`` access rebuilds with the new entry included.
+    """
+    global _POLICY_REGISTRY_CACHE
+    name = normalize_policy(pdef.name)
+    pdef = PolicyDef(name, pdef.needs_metrics, pdef.fn)
+    existing = _ensure_registry()
+    if name in existing:
+        raise ValueError(f"policy name {name!r} is already registered")
+    _EXTERNAL_POLICIES.append(pdef)
+    _POLICY_REGISTRY_CACHE = None
 
 
 def _build_registry(*policy_lists: list[PolicyDef]) -> dict[str, PolicyDef]:
@@ -237,22 +293,23 @@ _POLICY_REGISTRY_CACHE: dict[str, PolicyDef] | None = None
 def _ensure_registry() -> dict[str, PolicyDef]:
     global _POLICY_REGISTRY_CACHE
     if _POLICY_REGISTRY_CACHE is None:
-        from policy.gorgo import GORGO_POLICIES
-        from policy.lb_aibrix import AIBRIX_POLICIES
+        from gorgo.policy.gorgo import GORGO_POLICIES
+        from gorgo.policy.lb_aibrix import AIBRIX_POLICIES
 
         _POLICY_REGISTRY_CACHE = _build_registry(
             _CORE_POLICIES,
             AIBRIX_POLICIES,
             GORGO_POLICIES,
+            _EXTERNAL_POLICIES,
         )
     return _POLICY_REGISTRY_CACHE
 
 
 def __getattr__(name: str):
     """Lazy module attributes. ``POLICY_REGISTRY`` and
-    ``ROUTING_POLICIES`` are built on first access so ``policy.base``
-    can be imported by the sibling policy modules without circular
-    fallout."""
+    ``ROUTING_POLICIES`` are built on first access so
+    ``gorgo.policy.base`` can be imported by the sibling policy modules
+    without circular fallout."""
     if name == "POLICY_REGISTRY":
         return _ensure_registry()
     if name == "ROUTING_POLICIES":

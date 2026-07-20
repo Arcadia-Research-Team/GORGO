@@ -52,7 +52,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from policy.base import PolicyDef, RouteContext, RouteDecision, route_random
+from gorgo.policy.base import PolicyDef, RouteContext, RouteDecision, route_random
 
 # ---------------------------------------------------------------------------
 # Hyperparameter schema
