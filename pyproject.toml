@@ -3,6 +3,7 @@
 # import name stays `gorgo` (see [tool.hatch.build.targets.wheel]).
 name = "gorgo-lb"
 version = "0.2.0"
+license = "MIT"
 description = "Prefix-cache-, load-, and network-aware routing for LLM replica fleets, with online weight tuning"
 readme = "README.md"
 authors = [{ name = "Alessio Toniolo", email = "alessio@modal.com" }]
