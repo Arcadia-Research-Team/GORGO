@@ -1,7 +1,11 @@
 [project]
-name = "gorgo"
+# Distribution name: PyPI's "gorgo" is squatted (dormant since 2025-02); the
+# import name stays `gorgo` (see [tool.hatch.build.targets.wheel]).
+name = "gorgo-lb"
 version = "0.2.0"
 description = "Prefix-cache-, load-, and network-aware routing for LLM replica fleets, with online weight tuning"
+readme = "README.md"
+authors = [{ name = "Alessio Toniolo", email = "alessio@modal.com" }]
 requires-python = ">=3.11"
 # The shipped package (gorgo/) is stdlib-only by design: routing policies,
 # radix trie, ES tuner, OLS calibration, and SSE measurement all duck-type
@@ -27,6 +31,9 @@ analysis = [
     "seaborn>=0.13.0",
     "tiktoken>=0.12.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/atoniolo76/GORGO"
 
 [dependency-groups]
 dev = [
