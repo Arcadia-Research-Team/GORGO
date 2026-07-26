@@ -1,0 +1,39 @@
+{
+  "_note": "SATURATED companion to validate_apr6_h100.json, same H100:1 fleet and window. time_scale=0.25 (4x the production arrival rate; time_scale multiplies inter-arrival delays, so smaller = heavier load). Purpose: the ts=1.0 run measured queueing delay at a p50 of 0.5 ms -- the H100 fleet simply never queues on this trace -- so the cost model's queue term had nothing to be validated against. This run drives the fleet past its admission capacity so Q becomes observable, and pooled with the ts=1.0 run it gives a load sweep for the by-load calibration buckets. Replay is ~8 minutes at this scale.",
+  "run_id": "prod_c64_costmodel_apr6_h100_sat",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 0.25,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "centralus",
+    "northeurope",
+    "malaysiawest"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-static-p95-2d",
+      "hyperparameters": {
+        "rtt_weight": 0.276,
+        "queue_weight": 0.5,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      }
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 3.0,
+    "on_violation": "warn"
+  }
+}

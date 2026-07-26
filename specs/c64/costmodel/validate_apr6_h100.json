@@ -1,0 +1,39 @@
+{
+  "_note": "COST-MODEL VALIDATION on H100:1 engines (centralus / northeurope / malaysiawest), the AZR fleet already used for the paper's c=64 runs. L40S:2 in ap-seoul-1 / eu-frankfurt-1 / us-ashburn-1 was unschedulable, and coarse ap/eu/us pinning only reliably placed AP. Same window as specs/c64/eval_ts2/apr6.json (April 6 15:05-15:35 decoded) and the same single gorgo-2d policy with the paper's frozen weights.\n\ntime_scale is 1.0 here, NOT the 2.0 of the L40S spec: an H100:1 has roughly 2-2.5x the prefill throughput of an L40S:2 for this FP8 MoE plus far more KV headroom, so replaying at ts=2.0 would leave the fleet under-saturated and the queueing term would have almost nothing to be validated against. ts=1.0 targets comparable *utilization* to the paper's within-capacity stress point rather than a comparable arrival rate, which is what matters for exercising all three cost terms across a range of load. Consequence to state when reporting: absolute prefill_rate and queue_rate are H100 numbers and do not transfer to the L40S:2 tables; what transfers is whether the decomposition's structure holds and where it breaks.\n\nRequires REQUEST_TIMING_LOG=1 at launch, and GORGO_COMPLETIONS_VOLUME=GORGO-glm5-completions so /data holds the trace.",
+  "run_id": "prod_c64_costmodel_apr6_h100",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 1.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "centralus",
+    "northeurope",
+    "malaysiawest"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-static-p95-2d",
+      "hyperparameters": {
+        "rtt_weight": 0.276,
+        "queue_weight": 0.5,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      }
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 3.0,
+    "on_violation": "warn"
+  }
+}

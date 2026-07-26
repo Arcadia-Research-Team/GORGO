@@ -1,0 +1,39 @@
+{
+  "_note": "COST-MODEL VALIDATION on the apr6 15:05-15:35 decoded window at time_scale=2.0 -- the same held-out eval window and load point as specs/c64/eval_ts2/apr6.json, so measured components are collected under exactly the conditions that produced the paper's eval numbers. Single policy (gorgo-2d, the paper's frozen weights rtt=0.276 queue=0.5, prefill_rate=queue_rate=1.0) because this run validates the cost model's per-component predictions, not policy ranking -- baselines contribute nothing here and would cost 4x the GPUs. Requires the engine fleet to be launched with REQUEST_TIMING_LOG=1 so each replica emits its per-request scheduler timings (queue_time, forward_entry_time, prefill_finished_time) joined to proxy trace rows by rid. Predictions for OTHER parameterizations (physical rates, weights=1) are recomputed offline from the per-candidate features already in requests.jsonl, so no extra run is needed for them. 3 engines/region-set = 1 L40S:2 per region.",
+  "run_id": "prod_c64_costmodel_apr6_ts2",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 2.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "ap-seoul-1",
+    "eu-frankfurt-1",
+    "us-ashburn-1"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-static-p95-2d",
+      "hyperparameters": {
+        "rtt_weight": 0.276,
+        "queue_weight": 0.5,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      }
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 3.0,
+    "on_violation": "warn"
+  }
+}

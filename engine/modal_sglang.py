@@ -1,13 +1,14 @@
 import json
 import os
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
 
 import modal
 
-from app import app, ENVIRONMENT_NAME
+from app import app, bench_results_volume, ENVIRONMENT_NAME
 
 replicas = modal.Dict.from_name(
     "GORGO-replicas", create_if_missing=True, environment_name=ENVIRONMENT_NAME
@@ -62,6 +63,55 @@ MIN_CONTAINERS = os.getenv("MIN_CONTAINERS", 0)
 SCALEDOWN_WINDOW_SECONDS = int(os.getenv("SCALEDOWN_WINDOW_SECONDS", 15 * 60))
 WAIT_READY_TIMEOUT = os.getenv("WAIT_READY_TIMEOUT", 1200)
 
+# ---------------------------------------------------------------------------
+# Per-request engine timing log (cost-model validation only; off by default)
+# ---------------------------------------------------------------------------
+# Set ``REQUEST_TIMING_LOG=1`` to make SGLang emit one JSON line per request
+# carrying the scheduler's own per-request timestamps. This is what lets the
+# TTFT decomposition be validated against *measured* components rather than
+# inferred ones. Nothing here changes how requests are served or scheduled --
+# it is pure observability, and the routing policy still consumes only the
+# HTTP-exposed signals (``/metrics`` + the proxy's RTT probe).
+#
+# Mechanism, all stock SGLang flags (verified against this image with
+# ``scripts/introspect_sglang_engine.py``):
+#
+#   --enable-metrics          already passed below; gates the scheduler ->
+#                             tokenizer propagation of per-request timing
+#                             (``SchedulerReqTimeStats.__getstate__`` returns
+#                             ``{}`` without it) and the merge into meta_info
+#                             at ``tokenizer_manager.py:1665``.
+#   --log-requests            enables RequestLogger.
+#   --log-requests-level 0    skips ``text`` / ``input_ids`` / ``output_ids``,
+#                             so prompts never reach the log -- privacy-safe
+#                             and small, while ``meta_info`` is retained.
+#   --log-requests-format json  one JSON object per line.
+#   --log-requests-target DIR   a *directory*; SGLang writes
+#                               ``<hostname>_<rank>.log`` inside it
+#                               (``srt/utils/log_utils.py``).
+#
+# Each ``event: "request.finished"`` line carries ``rid`` plus ``out.meta_info``
+# with the fields the decomposition needs:
+#
+#   queue_time            = forward_entry_time - wait_queue_entry_time   (Q)
+#   forward_entry_time    absolute engine wall-clock at scheduler admission
+#   prefill_finished_time absolute engine wall-clock at end of prefill
+#                         => P = prefill_finished_time - forward_entry_time
+#   request_received_ts / response_sent_to_client_ts  (API-server side)
+#
+# Q and P are differences between two timestamps taken on the *same* host, so
+# neither needs cross-region clock alignment. The proxy sends its own request
+# id as SGLang's ``rid`` (a first-class field on the chat request), which is
+# the join key back to the proxy trace.
+REQUEST_TIMING_LOG = os.getenv("REQUEST_TIMING_LOG", "") not in ("", "0", "false", "False")
+# Root of the per-replica log directories on the bench-results volume.
+REQUEST_TIMING_LOG_ROOT = os.getenv("REQUEST_TIMING_LOG_ROOT", "/results/engine_req_logs")
+# The logging handler writes continuously but a Modal volume only publishes on
+# commit, so a background thread commits on this interval (and once more on
+# shutdown). Engines are torn down by the controller, so waiting for exit would
+# risk losing the whole run.
+REQUEST_TIMING_COMMIT_SECONDS = float(os.getenv("REQUEST_TIMING_COMMIT_SECONDS", 15.0))
+
 sglang_image = sglang_image.env(
     {
         "HF_HUB_CACHE": HF_CACHE_PATH,
@@ -77,6 +127,36 @@ sglang_image = sglang_image.run_commands(
     volumes={HF_CACHE_PATH: HF_CACHE_VOL},
     gpu=GPU,
 )
+# Install the per-request timing serialization fix (engine/sglang_timing_patch.py)
+# so SGLang's own scheduler timings survive the scheduler -> detokenizer ->
+# tokenizer hops and reach meta_info. Auto-imported through a ``.pth`` file --
+# NOT a ``sitecustomize.py``, which would shadow Modal's own ``/pkg/
+# sitecustomize.py`` (PYTHONPATH is ``/pkg/:/root/``) and break the container.
+# A ``.pth`` line that isn't an ``import`` statement is added to ``sys.path``,
+# so the file adds ``/opt/gorgo`` and then imports the module from it. The patch
+# is inert unless REQUEST_TIMING_LOG is set, so normal deploys are unaffected.
+# Placed after compile_deep_gemm to keep that layer's hash stable.
+sglang_image = sglang_image.add_local_file(
+    "engine/sglang_timing_patch.py", "/opt/gorgo/sglang_timing_patch.py", copy=True
+).run_commands(
+    "python3 -c \"import os, site; "
+    "d = site.getsitepackages()[0]; "
+    "open(os.path.join(d, 'zz_gorgo_timing_patch.pth'), 'w')"
+    ".write('/opt/gorgo\\nimport sglang_timing_patch\\n')\""
+)
+# Propagate the timing-log toggle into the container: the module is re-imported
+# there, so ``REQUEST_TIMING_LOG`` would otherwise always read empty and the
+# flags would silently never be passed. Deliberately a *separate* ``.env()``
+# call placed AFTER compile_deep_gemm -- folding it into the env block above
+# would change that layer's hash and force a ~20-minute kernel recompile on
+# every toggle. Deploy-time env controls it, matching REGION / GPU_TYPE.
+sglang_image = sglang_image.env(
+    {
+        "REQUEST_TIMING_LOG": os.getenv("REQUEST_TIMING_LOG", ""),
+        "REQUEST_TIMING_LOG_ROOT": REQUEST_TIMING_LOG_ROOT,
+        "REQUEST_TIMING_COMMIT_SECONDS": str(REQUEST_TIMING_COMMIT_SECONDS),
+    }
+)
 # Local source goes LAST so editing app/engine only rebuilds this cheap copy
 # layer, not the expensive compile_deep_gemm step above.
 sglang_image = sglang_image.add_local_python_source("app", "engine", copy=True)
@@ -89,7 +169,10 @@ sglang_image = sglang_image.add_local_python_source("app", "engine", copy=True)
     gpu=GPU,
     min_containers=int(MIN_CONTAINERS),
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
-    volumes={HF_CACHE_PATH: HF_CACHE_VOL},
+    # ``/results`` carries the per-request engine timing log when
+    # REQUEST_TIMING_LOG is on. Mounted unconditionally so toggling the env var
+    # doesn't change the image/function signature (and cost nothing when idle).
+    volumes={HF_CACHE_PATH: HF_CACHE_VOL, "/results": bench_results_volume},
 )
 def model_endpoint(registry_key: str = REGION):
     import os
@@ -122,18 +205,24 @@ def model_endpoint(registry_key: str = REGION):
         f"{CONTEXT_LENGTH}",
     ]
 
+    # Per-request timing log: stock flags only, see REQUEST_TIMING_LOG above.
+    timing_args, timing_log_dir = request_timing_log_args(registry_key)
+    cmd += timing_args
+
     # SGLang exposes OpenAI-compatible routes plus control endpoints; RadixAttention
     # KV state can be cleared with POST /flush_cache on this server (same port).
     with modal.forward(PORT) as tunnel:
         print(f"tunnel.url        = {tunnel.url}")
         print(f"tunnel.tls_socket = {tunnel.tls_socket}")
         process = subprocess.Popen(cmd)
+        stop_committing, committer = start_timing_log_committer(timing_log_dir)
         try:
             wait_ready(process)
             replicas[registry_key] = tunnel.url
             print(replicas[registry_key])
             process.wait()
         finally:
+            stop_timing_log_committer(stop_committing, committer)
             if replicas.get(registry_key) == tunnel.url:
                 replicas[registry_key] = ""
             if process.poll() is None:
@@ -143,6 +232,77 @@ def model_endpoint(registry_key: str = REGION):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+
+
+def request_timing_log_args(registry_key: str) -> tuple[list[str], str | None]:
+    """Extra ``sglang.launch_server`` args for the per-request timing log.
+
+    Returns ``([], None)`` when ``REQUEST_TIMING_LOG`` is off so callers can
+    splice unconditionally. Shared by ``model_endpoint`` here and
+    ``experiment_runner/policy_matrix_app.py::_serve_model`` so the single-engine
+    and fleet launch paths cannot drift.
+    """
+    if not REQUEST_TIMING_LOG:
+        return [], None
+    safe_key = "".join(c if c.isalnum() or c in "-_." else "_" for c in registry_key)
+    log_dir = os.path.join(REQUEST_TIMING_LOG_ROOT, safe_key)
+    os.makedirs(log_dir, exist_ok=True)
+    args = [
+        "--log-requests",
+        "--log-requests-level",
+        "0",  # no prompt text / token ids in the log
+        "--log-requests-format",
+        "json",
+        "--log-requests-target",
+        log_dir,
+    ]
+    print(f"request timing log -> {log_dir}", flush=True)
+    return args, log_dir
+
+
+def start_timing_log_committer(log_dir: str | None) -> tuple[threading.Event, object]:
+    """Start the periodic volume-commit thread for the timing log.
+
+    Returns ``(stop_event, thread_or_None)``; pass both to
+    :func:`stop_timing_log_committer` in a ``finally``.
+    """
+    stop = threading.Event()
+    if log_dir is None:
+        return stop, None
+    thread = threading.Thread(
+        target=_commit_timing_log_periodically, args=(stop,), daemon=True
+    )
+    thread.start()
+    return stop, thread
+
+
+def stop_timing_log_committer(stop: threading.Event, thread: object) -> None:
+    """Stop the committer and flush the tail of the log.
+
+    The controller tears fleets down, so a commit-on-exit-only policy would
+    routinely lose the last interval of every run.
+    """
+    stop.set()
+    if thread is not None:
+        thread.join(timeout=30)
+        _commit_timing_log()
+
+
+def _commit_timing_log() -> None:
+    """Publish whatever the request-timing handler has written so far.
+
+    A Modal volume only makes writes visible to other containers on commit, and
+    the analysis reads these files after the fleet is gone.
+    """
+    try:
+        bench_results_volume.commit()
+    except Exception as e:  # never let observability kill the engine
+        print(f"[timing-log] commit failed: {e!r}", flush=True)
+
+
+def _commit_timing_log_periodically(stop: threading.Event) -> None:
+    while not stop.wait(REQUEST_TIMING_COMMIT_SECONDS):
+        _commit_timing_log()
 
 
 def _check_process(process: subprocess.Popen):

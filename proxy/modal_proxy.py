@@ -2656,6 +2656,11 @@ def proxy(registry_key: str = ""):
                     "replica_key": replica_meta.get("replica_key"),
                     "replica_region": replica_meta.get("replica_region"),
                     "latency_seconds": snap.latency if snap else None,
+                    # The EWMA probe RTT the policy actually scored with. Without
+                    # it, offline term decomposition has to be inferred from
+                    # ``candidate_scores``; with it, the RTT term is exact for
+                    # every candidate, not just the chosen one.
+                    "network_rtt_seconds": snap.network_rtt if snap else None,
                     "num_running_reqs": snap.num_running_reqs if snap else None,
                     "num_queue_reqs": snap.num_queue_reqs if snap else None,
                     "num_used_tokens": snap.num_used_tokens if snap else None,
@@ -2767,6 +2772,15 @@ def proxy(registry_key: str = ""):
                 stream_options = {}
                 data["stream_options"] = stream_options
             stream_options.setdefault("include_usage", True)
+        # Hand our request id to the engine as SGLang's own ``rid`` (a
+        # first-class field on the chat request, kept rather than regenerated).
+        # This is the join key between this proxy's trace and the engine's
+        # per-request timing log, which is what makes a *measured* TTFT
+        # decomposition possible. Purely an identifier -- it does not affect
+        # scheduling. ``request_id`` is unique per request (workload-supplied
+        # ``x-gorgo-request-id``, else a fresh uuid4), and SGLang only requires
+        # uniqueness among concurrently in-flight requests on one replica.
+        data.setdefault("rid", request_id)
         upstream_path = "/v1/chat/completions"
         upstream_body = json.dumps(data).encode()
         headers_sent = False

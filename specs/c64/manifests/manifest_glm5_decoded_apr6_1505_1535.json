@@ -1,0 +1,10 @@
+{
+  "_note": "Same window as manifest_prod_decoded_apr6_1505_1535.json (April 6 15:05-15:35 high-diversity decoded eval window) but pointing at the actual on-volume filename. The published manifests were sanitized prod_* while the files on the private volume are glm5_*, so replays using the public manifest fail with FileNotFoundError. Requires the trace volume to be mounted at /data -- set GORGO_COMPLETIONS_VOLUME=GORGO-glm5-completions (see app.py).",
+  "top": [
+    {
+      "result": {
+        "output_path": "/data/mooncake_traces/decoded/glm5_decoded_apr6_1505_to_1535.jsonl"
+      }
+    }
+  ]
+}

@@ -42,7 +42,10 @@ from engine.modal_sglang import (
     PORT,
     SCALEDOWN_WINDOW_SECONDS,
     WAIT_READY_TIMEOUT,
+    request_timing_log_args,
     sglang_image,
+    start_timing_log_committer,
+    stop_timing_log_committer,
     wait_ready,
 )
 
@@ -89,16 +92,23 @@ def _serve_model(registry_key: str, tp_size: int | None = None) -> None:
         "--context-length",
         f"{CONTEXT_LENGTH}",
     ]
+    # Per-request engine timing log (off unless REQUEST_TIMING_LOG is set in the
+    # engine image env). Measurement only -- routing still reads just /metrics
+    # and the proxy RTT probe. See engine/modal_sglang.py::REQUEST_TIMING_LOG.
+    timing_args, timing_log_dir = request_timing_log_args(registry_key)
+    cmd += timing_args
     with modal.forward(PORT) as tunnel:
         print(f"tunnel.url        = {tunnel.url}")
         print(f"tunnel.tls_socket = {tunnel.tls_socket}")
         process = subprocess.Popen(cmd)
+        stop_committing, committer = start_timing_log_committer(timing_log_dir)
         try:
             wait_ready(process)
             replicas[registry_key] = tunnel.url
             print(replicas[registry_key])
             process.wait()
         finally:
+            stop_timing_log_committer(stop_committing, committer)
             if replicas.get(registry_key) == tunnel.url:
                 replicas[registry_key] = ""
             if process.poll() is None:
@@ -110,6 +120,18 @@ def _serve_model(registry_key: str, tp_size: int | None = None) -> None:
                     process.wait()
 
 
+# Shared by every H100 engine below. ``/results`` is the destination for the
+# per-request engine timing log when REQUEST_TIMING_LOG is on; inert otherwise.
+_H100_HF_VOLUME = {
+    "/root/.cache/huggingface": modal.Volume.from_name(
+        "Qwen3.5-35B-A3B-FP8-huggingface-cache",
+        create_if_missing=True,
+        environment_name=ENVIRONMENT_NAME,
+    ),
+    "/results": bench_results_volume,
+}
+
+
 @app.function(
     image=sglang_image,
     timeout=24 * 60 * 60,
@@ -118,13 +140,7 @@ def _serve_model(registry_key: str, tp_size: int | None = None) -> None:
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
     max_containers=8,
     retries=0,
-    volumes={
-        "/root/.cache/huggingface": modal.Volume.from_name(
-            "Qwen3.5-35B-A3B-FP8-huggingface-cache",
-            create_if_missing=True,
-            environment_name=ENVIRONMENT_NAME,
-        )
-    },
+    volumes=_H100_HF_VOLUME,
 )
 def engine_canada(registry_key: str) -> None:
     _serve_model(registry_key)
@@ -138,13 +154,7 @@ def engine_canada(registry_key: str) -> None:
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
     max_containers=8,
     retries=0,
-    volumes={
-        "/root/.cache/huggingface": modal.Volume.from_name(
-            "Qwen3.5-35B-A3B-FP8-huggingface-cache",
-            create_if_missing=True,
-            environment_name=ENVIRONMENT_NAME,
-        )
-    },
+    volumes=_H100_HF_VOLUME,
 )
 def engine_sines(registry_key: str) -> None:
     _serve_model(registry_key)
@@ -158,27 +168,13 @@ def engine_sines(registry_key: str) -> None:
     scaledown_window=SCALEDOWN_WINDOW_SECONDS,
     max_containers=8,
     retries=0,
-    volumes={
-        "/root/.cache/huggingface": modal.Volume.from_name(
-            "Qwen3.5-35B-A3B-FP8-huggingface-cache",
-            create_if_missing=True,
-            environment_name=ENVIRONMENT_NAME,
-        )
-    },
+    volumes=_H100_HF_VOLUME,
 )
 def engine_us_west4(registry_key: str) -> None:
     _serve_model(registry_key)
 
 
 # ---- H100:1 engines (AZR regions for c=64 experiments) ----
-
-_H100_HF_VOLUME = {
-    "/root/.cache/huggingface": modal.Volume.from_name(
-        "Qwen3.5-35B-A3B-FP8-huggingface-cache",
-        create_if_missing=True,
-        environment_name=ENVIRONMENT_NAME,
-    )
-}
 
 
 @app.function(
@@ -230,7 +226,10 @@ _L40S_HF_VOLUME = {
         "Qwen3.5-35B-A3B-FP8-huggingface-cache",
         create_if_missing=True,
         environment_name=ENVIRONMENT_NAME,
-    )
+    ),
+    # Destination for the per-request engine timing log when
+    # REQUEST_TIMING_LOG is on; inert otherwise.
+    "/results": bench_results_volume,
 }
 
 
@@ -276,6 +275,63 @@ def engine_us_ashburn(registry_key: str) -> None:
     _serve_model(registry_key, tp_size=2)
 
 
+# ---- L40S:2 engines pinned to coarse geographies ----
+#
+# Same GPU tier and tp as the three engines above, but constrained only to a
+# continent rather than a single datacenter. L40S:2 in ap-seoul-1 /
+# eu-frankfurt-1 / us-ashburn-1 is frequently unschedulable, and Modal's own
+# scheduler hint is to relax the region requirement. Cross-continent placement
+# is what the network term needs, and that survives: the exact datacenter does
+# not matter for the cost model, only that the three replicas sit far apart and
+# at different distances from the us-east proxy.
+#
+# Trade-off vs the pinned variants: placement (and therefore the precise RTT
+# spread) is no longer reproducible run to run, so report the measured
+# per-replica RTT rather than quoting the paper's 26-466 ms range.
+
+
+@app.function(
+    image=sglang_image,
+    timeout=24 * 60 * 60,
+    region="ap",
+    gpu="L40S:2",
+    scaledown_window=SCALEDOWN_WINDOW_SECONDS,
+    max_containers=8,
+    retries=0,
+    volumes=_L40S_HF_VOLUME,
+)
+def engine_ap(registry_key: str) -> None:
+    _serve_model(registry_key, tp_size=2)
+
+
+@app.function(
+    image=sglang_image,
+    timeout=24 * 60 * 60,
+    region="eu",
+    gpu="L40S:2",
+    scaledown_window=SCALEDOWN_WINDOW_SECONDS,
+    max_containers=8,
+    retries=0,
+    volumes=_L40S_HF_VOLUME,
+)
+def engine_eu(registry_key: str) -> None:
+    _serve_model(registry_key, tp_size=2)
+
+
+@app.function(
+    image=sglang_image,
+    timeout=24 * 60 * 60,
+    region="us",
+    gpu="L40S:2",
+    scaledown_window=SCALEDOWN_WINDOW_SECONDS,
+    max_containers=8,
+    retries=0,
+    volumes=_L40S_HF_VOLUME,
+)
+def engine_us(registry_key: str) -> None:
+    _serve_model(registry_key, tp_size=2)
+
+
 @app.function(
     image=PROXY_IMAGE,
     region="us-east",
@@ -306,6 +362,10 @@ ENGINE_BY_REGION = {
     "centralus": engine_centralus,
     "northeurope": engine_northeurope,
     "malaysiawest": engine_malaysiawest,
+    # Coarse geographies: same L40S:2 tier, far better schedulability.
+    "ap": engine_ap,
+    "eu": engine_eu,
+    "us": engine_us,
 }
 
 # ---------- Fleet GPU configuration ----------
@@ -324,6 +384,9 @@ GPU_BY_REGION = {
     "centralus": "H100",
     "northeurope": "H100",
     "malaysiawest": "H100",
+    "ap": FLEET_GPU,
+    "eu": FLEET_GPU,
+    "us": FLEET_GPU,
 }
 
 TERMINAL_WORKLOAD_STATUS = {"succeeded", "failed", "cancelled"}
