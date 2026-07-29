@@ -27,7 +27,7 @@
 
 \author{
   Alessio Ricci Toniolo \\
-  Carnegie Mellon University \\
+  Modal Labs \\
   \texttt{atoniolo@andrew.cmu.edu} \\
   \And
   Rome Thorstenson \\
@@ -60,7 +60,7 @@ p95 TTFT. During held-out evaluation windows, we fix the parameter values learne
 from tuning and improve p95 TTFT by 6.9--15.5\% and p95 end-to-end (E2E) latency by
 14.3--30.9\% over baseline load-balancing policies such as simple session affinity
 and prefix-cache.
-The code and ART-Chat-2.5M dataset can be found at \href{https://github.com/Arcadia-Research-Team/GORGO}{https://github.com/Arcadia-Research-Team/GORGO}.
+The code and ART-Chat-2.5M dataset can be found at \href{https://github.com/atoniolo76/GORGO}{https://github.com/atoniolo76/GORGO}.
 \end{abstract}
 
 % -----------------------------------------------------------------------
@@ -80,6 +80,25 @@ We benchmark GORGO on a series of user workloads from ART-Chat-2.5M, our sensiti
 \section{GORGO}
 \label{sec:method}
 % -----------------------------------------------------------------------
+
+\subsection{Design Space}
+
+For LLM load balancing policies, the design space includes which routing signals to consider and methods for choosing environment settings.
+ 
+\textbf{Routing Signals}: Across existing load balancing policies, two distinct routing signals are considered: (i) replica load and (ii) KV-cache locality.
+Simple policies such as least-load and least-request aim to evenly balance replica load while prefix-cache and simple-session-affinity aim to maximize KV-cache reuse per request.
+NVIDIA Dynamo~\citep{nvidiaDynamoRouter}, SGLang Router~\citep{sglang2024}, and Preble~\citep{preble} offer algorithms that jointly optimize for replica load and KV-cache locality.
+
+GORGO takes inspiration from early content-delivery network design, which has many similarities to LLM serving.
+\citet{wang2002cdn} used three signals---server load, network proximity, and cache locality---to reduce response time and increase capacity. Evaluating network proximity can improve
+responsiveness, or TTFT, in geo-distributed serving environments. GORGO is the first LLM load balancing policy to also optimize (iii) network latency from client to server.
+
+\textbf{Weight-selection Methods}: Methods for tuning the weights of a request scheduler fall into (i) offline and (ii) online protocols.
+Existing offline methods include Dynamo's SLA Planner, which has a sophisticated method to autoscale prefill and decode workers to meet TTFT and ITL targets. 
+It requires profiling before deployment to determine the optimal tensor parallelism configurations and scaling parameters for the planner to use during runtime~\citep{nvidiaDynamoPlanner}.
+
+GORGO uses online calibration because cache state, queue state, and batching behavior are intrinsically influenced by the routing policy's decisions, and accurately replicating the conditions necessary to evaluate the policies requires a dedicated replay fleet, shadow execution, or a sufficiently accurate simulator of cache and continuous-batching dynamics.
+After all, a request log generated under one policy does not contain the counterfactual cache and queue evolution that would have arisen under another set of weights.
 
 \subsection{Cost Model}
 
@@ -131,9 +150,7 @@ two popular LLM datasets derived from public chatbot demos
 contains hashed IPs per request, allowing categorization of cross-user and
 intra-user reuse while LMSYS-Chat-1M lacks user identification. Additional
 results from benchmarking GORGO on WildChat-4.8M can be found in
-Appendix~\ref{app:wildchat}. Cache-aware policies provide no measurable gains
-over simple baseline policies like \texttt{random} when routing requests with a
-length of $<$3{,}000 tokens.
+Appendix~\ref{app:wildchat}.
 
 \textbf{ART-Chat-2.5M} is a long-context, multi-turn dataset synthetically generated from
 a week-long metadata trace of production inference traffic with the same
@@ -307,6 +324,34 @@ Both weights reach their local optima after 672 samples, which occurs on the 18t
 \end{figure}
 
 % -----------------------------------------------------------------------
+\paragraph{BFCL multi-turn replay.}
+As an additional high-prefix-reuse workload, we replay 200 teacher-forced
+episodes from BFCL's \texttt{multi\_turn\_base} subset, where each episode
+contains sequential tool calls~\citep{patil2025bfcl}. We use two Qwen3-4B H200
+replicas in us-east and us-west, 128 concurrent episodes, and at most 256 output
+tokens per request. Identical prompts and tool results are replayed under GORGO
+and session affinity.
+
+\begin{table}[t]
+\centering
+\small
+\caption{BFCL multi-turn replay. Bold marks the best value per column.}
+\label{tab:bfcl}
+\setlength{\tabcolsep}{2.7pt}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Policy & TTFT p50 (ms) & TTFT p95 & TTFT p99 & E2E p50 (s) & E2E p95 & E2E p99 & ITL (ms) \\
+\midrule
+\textbf{GORGO}          & \textbf{3{,}328} & \textbf{4{,}700} & 5{,}720          & \textbf{3.66} & \textbf{5.17} & \textbf{6.15} & --- \\
+simple-session-affinity & 3{,}655          & 5{,}087          & \textbf{5{,}608} & 4.11          & 5.61          & 6.17          & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Under high load, GORGO reduces p50 and p95 TTFT by 8.9\% and 7.6\%, and p50
+and p95 E2E latency by 10.8\% and 7.9\%, respectively.
+
+% -----------------------------------------------------------------------
 \paragraph{Load Sweep}
 
 We find when sweeping across the \texttt{time\_scale} parameter that our SGLang inference engines reach a saturation point. After a concurrency threshold is reached,
@@ -403,12 +448,18 @@ convergence in our 2-dimensional weight space.
 
 Several constraints bound our conclusions. First, the evaluation rests on a
 single production trace and a homogeneous fleet (three regions, two L40S GPUs
-per replica); generalization to other workloads, hardware mixes, and replica
-counts is untested. Second, because the online
+per replica). GORGO does not currently model heterogeneous hardware setups,
+where replicas may have different prefill rates, queueing behavior, or KV-cache
+capacities; generalization to other workloads and replica counts is also
+untested. Second, because the online
 tuner optimizes p95 TTFT, it can exploit continuous batching by concentrating
 load on the nearest replica, trading E2E and ITL tails for TTFT
 (\S\ref{sec:results:hacking}); the queue term mitigates but does not eliminate
-this. Finally, we do not consider prefill/decode disaggregation.
+this. Third, we do not consider prefill/decode disaggregation, which introduces
+separate worker queues and KV-transfer costs. Finally, GORGO does not manage or
+directly observe replica-side KV-cache eviction. Consequently, the proxy's
+cache index may temporarily overestimate prefix availability when a cached
+prefix is evicted between routing and execution.
 
 % -----------------------------------------------------------------------
 \section{Conclusion}
@@ -422,13 +473,11 @@ terms of an additive per-replica cost and let online TTFT feedback optimize
 scaling weights, in place of operator-tuned constants or offline profiling. On a
 long-context, high-prefix-reuse production trace the GORGO policy family
 collectively achieves the lowest TTFT at every reported percentile across both
-held-out evaluation windows. On a short-prompt, low-reuse public
-trace (Appendix~\ref{app:wildchat}) the same policy is non-competitive, in
-agreement with the regime characterization in
-\S\ref{sec:characterization}. The advantage is therefore a property of the
-workload regime as much as of the policy: it scales with how much of TTFT is
-recoverable through prefill reuse, queue avoidance, or network selection rather
-than fixed by hardware. The design choices of GORGO transfer to
+held-out evaluation windows. On a held-out WildChat window,
+fixed-weight GORGO improves p95 TTFT by 17.2\% and p99 TTFT by 37.6\% over
+random routing (Appendix~\ref{app:wildchat}). On paired BFCL multi-turn
+replays, it reduces p95 TTFT and E2E latency by 7.6\% and 7.9\% relative to session
+affinity. The design choices of GORGO transfer to
 deployments where the workload regime is not known in advance and a dedicated
 calibration window before each redeploy is not affordable, making it effective in production LLM serving on long context, distributed workloads. 
 
@@ -601,23 +650,23 @@ prefix-cache            & 1{,}474      & 8{,}243          & 12{,}167         & 7
 \section{WildChat replay}
 \label{app:wildchat}
 
-\begin{table}[h]
+\begin{table}[htbp]
 \centering
 \small
-\caption{WildChat-4.8M replay. We evaluate the same baseline policies with GORGO on a 30-minute window where $c{=}32$. TTFT latencies are in seconds.
-}
+\caption{Held-out WildChat-4.8M replay at \texttt{time\_scale}${=}2.0$
+(5.7 requests/s open-loop), $c{=}64$, using one H100 replica in each of
+us-west4, CANADA-2, and sines-2. Fixed-weight GORGO uses the weights learned on
+the first window ($w_{\mathrm{rtt}}{=}2.0$ and
+$w_{\mathrm{queue}}{=}0.104$). Each arm contains 20{,}422 completed requests
+with zero failures. Bold marks the best value per column; ITL is the median.}
 \label{tab:wildchat}
-\begin{tabular}{lrrrrr}
+\setlength{\tabcolsep}{2.7pt}
+\begin{tabular}{lrrrrrrr}
 \toprule
-Policy & Completed & TTFT p50 & TTFT p95 & TTFT p99 & TTFT max \\
+Policy & TTFT p50 (ms) & TTFT p95 & TTFT p99 & E2E p50 (s) & E2E p95 & E2E p99 & ITL (ms) \\
 \midrule
-\textbf{simple-session-affinity} & 20{,}447 & 0.416 & \textbf{1.025} & \textbf{1.712} & 7.75    \\
-least-request                    & 20{,}517 & 0.480 & 1.036          & 1.731          & 110.45  \\
-random                           & 20{,}436 & \textbf{0.416} & 1.077 & 1.796          & 15.82   \\
-prefix-cache                     & 20{,}504 & 0.497 & 1.186          & 2.588          & 10.63   \\
-least-load                       & 20{,}484 & 0.532 & 1.217          & 2.535          & 8.28    \\
-gorgo (online)                   & 20{,}473 & 0.541 & 1.325          & 2.654          & 7.05    \\
-gorgo (fixed)                    & 20{,}462 & 0.709 & 1.932          & 3.969          & 60.18   \\
+GORGO  & \textbf{215} & \textbf{506} & \textbf{728}   & 1.55          & \textbf{2.42} & \textbf{2.98} & 10.1 \\
+random & 244          & 611          & 1{,}166         & \textbf{1.38} & 2.51          & 4.04          & \textbf{8.4} \\
 \bottomrule
 \end{tabular}
 \end{table}

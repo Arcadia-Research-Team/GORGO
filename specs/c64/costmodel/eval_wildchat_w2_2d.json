@@ -1,0 +1,36 @@
+{
+  "_note": "EVAL (WildChat window 2, held out). Frozen-weight eval for the 2D-cost-model WildChat rerun. Window 2 was never used in the paper. The tune->eval chain overwrites the gorgo hyperparameters below with the weights learned on window 1 and posts /tune {enabled:false}; random and simple-session-affinity rerun on their own fleets as live controls. Labels must match tune_wildchat_w1_2d.json exactly -- the chain matches eval policies to fleets by label.",
+  "run_id": "prod_c64_costmodel_eval_wildchat_w2_2d",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 1.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "us-west4",
+    "CANADA-2",
+    "sines-2"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-hillclimb-p95-2d-wildchat",
+      "hyperparameters": {
+        "rtt_weight": 1.0,
+        "queue_weight": 0.08
+      }
+    },
+    {
+      "name": "random",
+      "label": "random"
+    },
+    {
+      "name": "simple-session-affinity",
+      "label": "simple-session-affinity"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "_note": "HELD-OUT EVAL (2D control).\n\nCONTROL ARM for costmodel_hetero_3d_v3. Identical fleet (eu-frankfurt-1 L40S:2 + us-west4 H100:1), identical windows, identical time_scale=2.0, identical ES config (window 256 / hop 64, sigma 0.5, sigma_min 0.02, seed 20260726). The ONLY difference is the parameter set: no per-class prefill scale, no KV-capacity queue normalization, no reference pin. prefill_rate and queue_rate stay at 1.0 on every replica, so this is GORGO exactly as published, dropped onto heterogeneous hardware with no awareness of it.\n\nPurpose: measure what hardware-awareness is worth. The comparison of interest is held-out Apr 6 TTFT, 2D vs 3D, on the same fleet composition. Run in parallel with the 3D arm so both see the same network conditions -- the paper's own rationale for parallel policy runs.",
+  "run_id": "prod_c64_costmodel_eval_apr6_hetero_2d_ts2",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 2.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "eu-frankfurt-1",
+    "us-west4"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-hillclimb-p95-2d-hetero",
+      "hyperparameters": {
+        "rtt_weight": 0.5,
+        "queue_weight": 0.1,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      }
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 100.0,
+    "on_violation": "warn"
+  }
+}

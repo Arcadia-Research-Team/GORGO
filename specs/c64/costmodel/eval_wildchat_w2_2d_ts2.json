@@ -1,0 +1,47 @@
+{
+  "_note": "EVAL at half load (WildChat window 2, time_scale 2.0). Companion to costmodel_wildchat_2d_v2: same three arms, same H100 regions, same held-out window, but the 30-min trace replays over 60 min (5.7 rps) so the fleet runs unsaturated and the client honors the open-loop schedule. gorgo-2d runs STATIC at the weights learned in v2's ts=1.0 window-1 tune (rtt_weight=2.0 at the box ceiling, queue_weight=0.104, ratio 19.2 ~ the physical H100 prior) -- matching the paper's tune-at-1x / eval-at-ts2 protocol. Run as a base spec with no eval chain and no auto_tune.\n\nPurpose: v2 at ts=1.0 was closed-loop saturated (client slip ~15 min in every arm); the paper's load sweep says saturation trades gorgo's TTFT for E2E. This run measures the same policies at the unsaturated operating point.",
+  "run_id": "prod_c64_costmodel_eval_wildchat_w2_2d_ts2",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 2.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "us-west4",
+    "CANADA-2",
+    "sines-2"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-static-p95-2d-wildchat",
+      "hyperparameters": {
+        "rtt_weight": 2.0,
+        "queue_weight": 0.10393626233260578,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      }
+    },
+    {
+      "name": "random",
+      "label": "random"
+    },
+    {
+      "name": "simple-session-affinity",
+      "label": "simple-session-affinity"
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 100.0,
+    "on_violation": "warn"
+  }
+}

@@ -165,16 +165,41 @@ def ols(xs: list[float], ys: list[float]) -> tuple[float, float, float]:
     return a, b, 1.0 - resid / syy
 
 
-def multi_ols(predictors: list[list[float]], ys: list[float]) -> tuple[list[float], float]:
+def multi_ols(
+    predictors: list[list[float]], ys: list[float], intercept: bool = True
+) -> tuple[list[float], float]:
     """Least squares for ``y = c0 + c1*x1 + ... + ck*xk``.
 
     Returns ``(coefficients_with_intercept_first, r2)``. Reuses the tiny
-    dependency-free solver the online calibrator already relies on.
+    dependency-free solver the online calibrator already relies on. With
+    ``intercept=False`` the returned list still leads with a 0.0 placeholder so
+    callers can index coefficients uniformly.
     """
     from gorgo.tuner import solve_spd
 
     n = len(ys)
     k = len(predictors)
+    if not intercept:
+        design = [[predictors[j][i] for j in range(k)] for i in range(n)]
+        dim = k
+        a = [[0.0] * dim for _ in range(dim)]
+        b = [0.0] * dim
+        for i in range(n):
+            row = design[i]
+            for p in range(dim):
+                b[p] += row[p] * ys[i]
+                for q in range(dim):
+                    a[p][q] += row[p] * row[q]
+        coef = solve_spd(a, b)
+        if coef is None:
+            return [float("nan")] * (dim + 1), float("nan")
+        my = sum(ys) / n
+        syy = sum((y - my) ** 2 for y in ys)
+        resid = sum(
+            (ys[i] - sum(c * v for c, v in zip(coef, design[i]))) ** 2 for i in range(n)
+        )
+        return [0.0] + list(coef), (1.0 if syy <= 0 else 1.0 - resid / syy)
+
     design = [[1.0] + [predictors[j][i] for j in range(k)] for i in range(n)]
     dim = k + 1
     a = [[0.0] * dim for _ in range(dim)]
@@ -292,6 +317,33 @@ def load_proxy_requests(results_dir: str, run_prefix: str) -> list[dict]:
     return rows
 
 
+def load_tune_trajectory(results_dir: str, run_prefix: str) -> list[dict]:
+    """ES steps from ``tune.jsonl``: the weight path the hillclimb actually walked.
+
+    Empty for a frozen run, which is the expected state for a held-out eval.
+    """
+    root = os.path.join(results_dir, "proxy_traces")
+    steps: list[dict] = []
+    for path in sorted(
+        p
+        for p in glob.glob(os.path.join(root, "**", "tune.jsonl"), recursive=True)
+        if run_prefix in os.path.relpath(p, root)
+    ):
+        with open(path, "r", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("kind") == "tune":
+                    steps.append(rec)
+    steps.sort(key=lambda s: (s.get("total_samples") or 0, s.get("step") or 0))
+    return steps
+
+
 def _duration(value) -> float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
@@ -398,16 +450,74 @@ def build_records(rows: list[dict], engine: dict[tuple[str, str], dict]) -> tupl
     return records, dict(skipped)
 
 
-def predict(rec: dict, params: dict) -> dict:
-    """Cost-model prediction for one request under ``params``."""
-    rtt_pred = params["rtt_weight"] * (rec["rtt_ms"] or 0.0)
-    p_pred = params["prefill_rate"] * rec["uncached_tokens"]
-    q_pred = params["queue_rate"] * params["queue_weight"] * rec["queued_tokens"]
+_PARAM_DEFAULTS = (
+    ("rtt_weight", 1.0),
+    ("prefill_rate", 1.0),
+    ("queue_rate", 1.0),
+    ("queue_weight", 1.0),
+)
+
+
+def with_defaults(params: dict | None) -> dict:
+    out = dict(params or {})
+    for key, default in _PARAM_DEFAULTS:
+        out.setdefault(key, default)
+    return out
+
+
+def predict(rec: dict, params: dict | None = None) -> dict:
+    """Cost-model prediction for one request.
+
+    ``params=None`` means "use the weights that were actually in force when this
+    request was routed" (``hyperparameters_at_decision``). That matters during a
+    tuning window, where the ES rewrites the weights every ``hop_size`` samples:
+    scoring the whole run with one weight vector would attribute every request
+    to whichever vector happened to be live first.
+    """
+    p = with_defaults(rec.get("hp") if params is None else params)
+    rtt_pred = p["rtt_weight"] * (rec["rtt_ms"] or 0.0)
+    p_pred = p["prefill_rate"] * rec["uncached_tokens"]
+    q_pred = p["queue_rate"] * p["queue_weight"] * rec["queued_tokens"]
     return {
         "rtt_pred_ms": rtt_pred,
         "p_pred_ms": p_pred,
         "q_pred_ms": q_pred,
         "ttft_pred_ms": rtt_pred + p_pred + q_pred,
+    }
+
+
+def weight_census(records: list[dict]) -> dict:
+    """Distinct ``(rtt_weight, queue_weight)`` vectors actually used, with counts.
+
+    A held-out eval must show exactly one. More than one means the tuner was
+    still live -- the failure mode the ``gorgo-2d`` guard fix in
+    ``experiment_runner/policy_matrix_app.py`` exists to prevent.
+    """
+    counts: dict[tuple, int] = defaultdict(int)
+    for r in records:
+        p = with_defaults(r.get("hp"))
+        counts[
+            (
+                round(float(p["rtt_weight"]), 6),
+                round(float(p["queue_weight"]), 6),
+                round(float(p["prefill_rate"]), 6),
+                round(float(p["queue_rate"]), 6),
+            )
+        ] += 1
+    ordered = sorted(counts.items(), key=lambda kv: -kv[1])
+    return {
+        "n_distinct": len(ordered),
+        "frozen": len(ordered) == 1,
+        "vectors": [
+            {
+                "rtt_weight": k[0],
+                "queue_weight": k[1],
+                "prefill_rate": k[2],
+                "queue_rate": k[3],
+                "n_requests": n,
+            }
+            for k, n in ordered
+        ],
     }
 
 
@@ -443,24 +553,307 @@ def bucketize(records: list[dict], key: str, edges: list[float]) -> list[tuple[s
 
 
 # ---------------------------------------------------------------------------
+# Scale-free tests
+# ---------------------------------------------------------------------------
+
+# The ES box from specs/c64/tuning/policy_matrix_c64_tuning_p95ttft_2d.json,
+# which paper v3 tunes inside. Reported against the weights that would actually
+# reproduce the measured composition, to show whether the calibrated point is
+# even reachable by the search.
+PAPER_ES_BOX = {"rtt_weight": (0.05, 2.0), "queue_weight": (0.05, 0.5)}
+WIDE_BOX = {"rtt_weight": (1e-3, 200.0), "queue_weight": (1e-6, 2.0)}
+
+_TERMS = ("network", "prefill", "queue")
+
+
+def _shares(vals: dict[str, float]) -> dict[str, float]:
+    total = sum(vals.values())
+    if total <= 0:
+        return {k: float("nan") for k in vals}
+    return {k: v / total for k, v in vals.items()}
+
+
+def report_composition(records: list[dict]) -> dict:
+    """Compare the *composition* of predicted vs measured TTFT, scale-free.
+
+    The deployed score has no units -- ``argmin`` is invariant to scale, so the
+    absolute prediction is not a well-posed thing to check. What *is* identifiable
+    is how the score divides itself between terms. This compares that against how
+    measured TTFT actually divides itself, with **zero fitted parameters**.
+
+    ``ingress`` is excluded from the denominator and reported separately: the cost
+    model has no term for it, so including it would charge the model for a stage
+    it never claimed to explain.
+    """
+    print()
+    print("=" * 78)
+    print("COMPOSITION: predicted vs measured share of TTFT (zero fitted parameters)")
+    print("=" * 78)
+
+    pred_rows, meas_rows = [], []
+    for r in records:
+        p = predict(r)  # per-request deployed weights
+        pv = {"network": p["rtt_pred_ms"], "prefill": p["p_pred_ms"], "queue": p["q_pred_ms"]}
+        mv = {
+            "network": max(0.0, r["resid_meas_ms"]),
+            "prefill": max(0.0, r["p_meas_ms"]),
+            "queue": max(0.0, r["q_meas_ms"]),
+        }
+        if sum(pv.values()) <= 0 or sum(mv.values()) <= 0:
+            continue
+        pred_rows.append(_shares(pv))
+        meas_rows.append(_shares(mv))
+        r["_pred_terms"], r["_meas_terms"] = pv, mv
+
+    if not pred_rows:
+        print("  no scorable requests")
+        return {}
+
+    scored = [r for r in records if "_pred_terms" in r]
+    agg_pred = _shares({t: sum(r["_pred_terms"][t] for r in scored) for t in _TERMS})
+    agg_meas = _shares({t: sum(r["_meas_terms"][t] for r in scored) for t in _TERMS})
+    ing_total = sum(r["ingress_meas_ms"] or 0.0 for r in scored)
+    meas_total = sum(sum(r["_meas_terms"].values()) for r in scored)
+
+    print("  aggregate share of modeled TTFT:")
+    for t in _TERMS:
+        print(
+            f"    {t:9} predicted {agg_pred[t] * 100:5.1f}%   measured {agg_meas[t] * 100:5.1f}%"
+            f"   delta {(agg_pred[t] - agg_meas[t]) * 100:+6.1f} pp"
+        )
+    print(
+        f"    [unmodeled ingress = "
+        f"{100.0 * ing_total / (meas_total + ing_total):.1f}% of full TTFT]"
+    )
+
+    print("  per-request share error (percentage points):")
+    print(f"    {'term':9} {'pred p50':>9} {'meas p50':>9} {'|d| p50':>8} {'|d| p95':>8} {'rho':>7}")
+    per_term = {}
+    for t in _TERMS:
+        pv = [row[t] for row in pred_rows]
+        mv = [row[t] for row in meas_rows]
+        err = [abs(a - b) * 100 for a, b in zip(pv, mv)]
+        per_term[t] = {
+            "pred_share_p50": median(pv),
+            "meas_share_p50": median(mv),
+            "abs_share_err_pp_p50": median(err),
+            "abs_share_err_pp_p95": percentile(err, 0.95),
+            "spearman_rho": spearman(pv, mv),
+            "agg_pred_share": agg_pred[t],
+            "agg_meas_share": agg_meas[t],
+        }
+        print(
+            f"    {t:9} {median(pv) * 100:8.1f}% {median(mv) * 100:8.1f}% "
+            f"{median(err):8.1f} {percentile(err, 0.95):8.1f} {spearman(pv, mv):7.3f}"
+        )
+
+    tv = [0.5 * sum(abs(a[t] - b[t]) for t in _TERMS) for a, b in zip(pred_rows, meas_rows)]
+    print(
+        f"    total-variation distance between compositions: p50 {median(tv):.3f}  "
+        f"p95 {percentile(tv, 0.95):.3f}   (0 = identical, 1 = disjoint)"
+    )
+
+    # Dominant-term agreement, against the baseline you would get if the two
+    # were statistically independent -- otherwise a skewed marginal makes a
+    # useless predictor look informative.
+    dom_p = [max(_TERMS, key=lambda t: row[t]) for row in pred_rows]
+    dom_m = [max(_TERMS, key=lambda t: row[t]) for row in meas_rows]
+    agree = sum(1 for a, b in zip(dom_p, dom_m) if a == b) / len(dom_p)
+    fp = {t: dom_p.count(t) / len(dom_p) for t in _TERMS}
+    fm = {t: dom_m.count(t) / len(dom_m) for t in _TERMS}
+    baseline = sum(fp[t] * fm[t] for t in _TERMS)
+    print(
+        f"  dominant-term agreement: {agree * 100:.1f}%  "
+        f"(independence baseline {baseline * 100:.1f}%)"
+    )
+    print(f"    predicted { {t: round(fp[t], 3) for t in _TERMS} }")
+    print(f"    measured  { {t: round(fm[t], 3) for t in _TERMS} }")
+
+    return {
+        "per_term": per_term,
+        "tv_distance_p50": median(tv),
+        "tv_distance_p95": percentile(tv, 0.95),
+        "dominant_term_agreement": agree,
+        "dominant_term_independence_baseline": baseline,
+        "predicted_dominant_freq": fp,
+        "measured_dominant_freq": fm,
+        "unmodeled_ingress_share": ing_total / (meas_total + ing_total),
+    }
+
+
+def report_form_ceiling(records: list[dict]) -> dict:
+    """Best R^2 any weights could achieve for this functional form.
+
+    Fits ``TTFT ~ a*rtt + b*uncached + c*queued`` directly against measured TTFT
+    with full hindsight. No online tuner can beat this, so it upper-bounds what
+    retuning -- on any hardware, in any search box -- could ever deliver. The
+    ``true components`` row is a sanity check: it must be ~1.0, since the
+    decomposition is exact by construction.
+    """
+    print()
+    print("=" * 78)
+    print("CEILING: best R^2 achievable by ANY weights in this functional form")
+    print("=" * 78)
+    have = [r for r in records if isinstance(r.get("rtt_ms"), (int, float))]
+    if len(have) < 10:
+        print("  too few records with RTT")
+        return {}
+    ys = [r["ttft_ms"] for r in have]
+    rtts = [r["rtt_ms"] for r in have]
+    unc = [float(r["uncached_tokens"]) for r in have]
+    qd = [float(r["queued_tokens"]) for r in have]
+    ptok = [float(r["prompt_tokens"]) for r in have]
+
+    out = {}
+    for label, preds, names, icept in (
+        ("cost-model form, through origin", [rtts, unc, qd], ["rtt_ms", "uncached", "queued"], False),
+        ("cost-model form + intercept", [rtts, unc, qd], ["rtt_ms", "uncached", "queued"], True),
+        (
+            "+ prompt_tokens (models ingress)",
+            [rtts, unc, qd, ptok],
+            ["rtt_ms", "uncached", "queued", "prompt_tokens"],
+            True,
+        ),
+    ):
+        coef, r2 = multi_ols(preds, ys, intercept=icept)
+        terms = "  ".join(f"{nm}={c:+.5f}" for nm, c in zip(names, coef[1:]))
+        print(f"  {label:34} R^2={r2:6.3f}  intercept={coef[0]:7.1f}  {terms}")
+        out[label] = {"r2": r2, "intercept_ms": coef[0], "coefficients": dict(zip(names, coef[1:]))}
+
+    comps = [
+        [r["resid_meas_ms"] for r in have],
+        [r["p_meas_ms"] for r in have],
+        [r["q_meas_ms"] for r in have],
+        [r["ingress_meas_ms"] or 0.0 for r in have],
+    ]
+    _, r2_true = multi_ols(comps, ys, intercept=False)
+    print(f"  {'true measured components (sanity)':34} R^2={r2_true:6.3f}  (must be ~1.000)")
+    out["true_components_r2"] = r2_true
+    print(
+        "  The gap between these rows and 1.0 is the form's own error, not the tuner's.\n"
+        "  Retuning cannot cross it."
+    )
+    return out
+
+
+def report_box_reachability(records: list[dict], chosen: dict | None = None) -> dict:
+    """Can any weights inside the ES search box reproduce the measured composition?
+
+    Grid-searches ``(rtt_weight, queue_weight)`` for the minimum total-variation
+    distance between the aggregate predicted and measured compositions, inside the
+    paper's box and inside a deliberately wide one. If the wide-box optimum lies
+    outside the paper's box, the search itself -- not the model form and not the
+    hardware -- is what prevents calibration.
+    """
+    print()
+    print("=" * 78)
+    print("REACHABILITY: can the ES box reproduce the measured composition?")
+    print("=" * 78)
+    have = [r for r in records if isinstance(r.get("rtt_ms"), (int, float))]
+    if len(have) < 10:
+        print("  too few records with RTT")
+        return {}
+    sum_rtt = sum(r["rtt_ms"] for r in have)
+    sum_unc = sum(float(r["uncached_tokens"]) for r in have)
+    sum_qd = sum(float(r["queued_tokens"]) for r in have)
+    tgt = _shares(
+        {
+            "network": sum(max(0.0, r["resid_meas_ms"]) for r in have),
+            "prefill": sum(max(0.0, r["p_meas_ms"]) for r in have),
+            "queue": sum(max(0.0, r["q_meas_ms"]) for r in have),
+        }
+    )
+    print(
+        f"  measured composition: network {tgt['network'] * 100:.1f}% / "
+        f"prefill {tgt['prefill'] * 100:.1f}% / queue {tgt['queue'] * 100:.1f}%"
+    )
+
+    def tv_at(rw: float, qw: float) -> float:
+        c = _shares({"network": rw * sum_rtt, "prefill": sum_unc, "queue": qw * sum_qd})
+        return 0.5 * sum(abs(c[t] - tgt[t]) for t in _TERMS)
+
+    out: dict = {"measured_composition": tgt}
+    for name, box in (("paper ES box", PAPER_ES_BOX), ("wide box", WIDE_BOX)):
+        rlo, rhi = box["rtt_weight"]
+        qlo, qhi = box["queue_weight"]
+        n = 300
+        grid_r = [math.exp(math.log(rlo) + (math.log(rhi) - math.log(rlo)) * i / (n - 1)) for i in range(n)]
+        grid_q = [math.exp(math.log(qlo) + (math.log(qhi) - math.log(qlo)) * i / (n - 1)) for i in range(n)]
+        best = min(((tv_at(rw, qw), rw, qw) for rw in grid_r for qw in grid_q))
+        tv_best, rw, qw = best
+        c = _shares({"network": rw * sum_rtt, "prefill": sum_unc, "queue": qw * sum_qd})
+        print(
+            f"  {name:13} best TV {tv_best:.3f} at rtt_weight={rw:.4g} queue_weight={qw:.4g}"
+            f"  -> network {c['network'] * 100:5.1f}% / prefill {c['prefill'] * 100:5.1f}%"
+            f" / queue {c['queue'] * 100:5.1f}%"
+        )
+        out[name] = {"tv": tv_best, "rtt_weight": rw, "queue_weight": qw, "composition": c}
+
+    # Closed form: the weights that match the composition exactly, unbounded.
+    rw_star = (tgt["network"] / tgt["prefill"]) * sum_unc / sum_rtt if sum_rtt > 0 else float("nan")
+    qw_star = (tgt["queue"] / tgt["prefill"]) * sum_unc / sum_qd if sum_qd > 0 else float("nan")
+    out["exact_match_unbounded"] = {"rtt_weight": rw_star, "queue_weight": qw_star}
+    rlo, rhi = PAPER_ES_BOX["rtt_weight"]
+    qlo, qhi = PAPER_ES_BOX["queue_weight"]
+    inside = (rlo <= rw_star <= rhi) and (qlo <= qw_star <= qhi)
+    out["exact_match_inside_paper_box"] = inside
+    print(f"  exact-match weights (unbounded): rtt_weight={rw_star:.4g} queue_weight={qw_star:.4g}")
+    print(f"  -> {'INSIDE' if inside else 'OUTSIDE'} the ES box (rtt {rlo}-{rhi}, queue {qlo}-{qhi})")
+
+    # Whether the box *excludes* the calibrated point is a different question
+    # from whether the box is what stopped the optimizer. If the tuner settled
+    # strictly inside the box, it had room left in the calibrated direction and
+    # declined to use it -- so the binding constraint is the objective, not the
+    # bounds. Saying "the box binds" without this check overclaims.
+    if chosen and isinstance(chosen.get("rtt_weight"), (int, float)):
+        crw, cqw = float(chosen["rtt_weight"]), float(chosen["queue_weight"])
+        edge_tol = 0.02
+        at_edge = (
+            abs(crw - rhi) / rhi < edge_tol
+            or abs(crw - rlo) / rlo < edge_tol
+            or abs(cqw - qhi) / qhi < edge_tol
+            or abs(cqw - qlo) / qlo < edge_tol
+        )
+        out["chosen_weights"] = {"rtt_weight": crw, "queue_weight": cqw}
+        out["chosen_at_box_edge"] = at_edge
+        headroom = (rw_star - crw) / (rhi - crw) if rhi > crw else float("nan")
+        print(
+            f"  tuner settled at rtt_weight={crw:.4g} queue_weight={cqw:.4g} -- "
+            f"{'ON the box edge' if at_edge else 'STRICTLY INSIDE the box'}"
+        )
+        if not at_edge and not inside:
+            print(
+                f"     It had {rhi / crw:.2f}x more rtt_weight available inside the box and did\n"
+                f"     not use it, so the bounds are NOT what prevents calibration -- the\n"
+                f"     p95 objective and the calibrated composition are different optima."
+            )
+        elif at_edge and not inside:
+            print(
+                "     It ran to the boundary in the calibrated direction, so the bounds are\n"
+                "     plausibly binding; widening the box would test that directly."
+            )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
 
 def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
-    deployed = dict(records[0]["hp"]) if records else {}
-    for key, default in (
-        ("rtt_weight", 1.0),
-        ("prefill_rate", 1.0),
-        ("queue_rate", 1.0),
-        ("queue_weight", 1.0),
-    ):
-        deployed.setdefault(key, default)
+    census = weight_census(records)
+    # The modal weight vector, for the headline "deployed" numbers. Per-request
+    # predictions still use each request's own weights (predict(rec, None)).
+    modal = census["vectors"][0] if census["vectors"] else {}
+    deployed = with_defaults(
+        {k: modal[k] for k in ("rtt_weight", "queue_weight", "prefill_rate", "queue_rate") if k in modal}
+    )
     physical = fit_physical_rates(records)
 
     summary: dict = {
         "n_joined": len(records),
         "skipped": skipped,
+        "weight_census": census,
         "deployed_params": deployed,
         "physical_params": physical,
         "components": {},
@@ -475,6 +868,28 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
     print(f"  joined requests: {len(records)}")
     for reason, n in sorted(skipped.items(), key=lambda kv: -kv[1]):
         print(f"  skipped ({reason}): {n}")
+
+    print()
+    print("=" * 78)
+    print("WEIGHTS ACTUALLY IN FORCE")
+    print("=" * 78)
+    print(f"  distinct weight vectors: {census['n_distinct']}")
+    for v in census["vectors"][:8]:
+        print(
+            f"    rtt_weight={v['rtt_weight']:<10.5f} queue_weight={v['queue_weight']:<10.5f} "
+            f"prefill_rate={v['prefill_rate']:<8.4f} queue_rate={v['queue_rate']:<8.4f} "
+            f"n={v['n_requests']}"
+        )
+    if census["n_distinct"] > 8:
+        print(f"    ... and {census['n_distinct'] - 8} more")
+    if census["frozen"]:
+        print("  -> FROZEN: one weight vector for the whole run (a valid held-out eval).")
+    else:
+        print(
+            "  -> LIVE TUNING: weights changed during this run. Per-request predictions\n"
+            "     below use each request's own weights. If this was meant to be a\n"
+            "     held-out eval, the tuner was not disabled and the run is invalid."
+        )
 
     print()
     print("=" * 78)
@@ -516,8 +931,9 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
     )
     print(f"  rtt_weight    deployed {deployed['rtt_weight']:.5f} (1.0 = unbiased RTT)")
 
-    # Per-component accuracy under both parameterizations.
-    for label, params in (("deployed", deployed), ("physical", physical)):
+    # Per-component accuracy under both parameterizations. ``deployed`` passes
+    # params=None so each request is scored with its own hyperparameters_at_decision.
+    for label, params in (("deployed", None), ("physical", physical)):
         print()
         print("=" * 78)
         print(f"PER-COMPONENT ACCURACY -- {label} parameters")
@@ -559,6 +975,10 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
             "(shape-only test; absorbs the unidentifiable score scale)"
         )
         summary["components"][label]["affine_fit"] = {"a": a, "b": b, "r2": r2}
+
+    summary["composition"] = report_composition(records)
+    summary["form_ceiling"] = report_form_ceiling(records)
+    summary["box_reachability"] = report_box_reachability(records, chosen=deployed)
 
     # Calibration by request length and by load.
     for bucket_label, key, edges, store in (
@@ -681,16 +1101,104 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
         "queued_tokens", "rtt_ms", "ttft_ms", "q_meas_ms", "p_meas_ms",
         "ingress_meas_ms", "resid_meas_ms",
     ]
+    # Physical-rate predictions, the weights in force at decision time, the
+    # deployed-weight term values, and both share vectors -- everything needed
+    # to redo the composition test offline without rerunning this script.
+    extra = [
+        "rtt_pred_ms", "q_pred_ms", "p_pred_ms", "ttft_pred_ms",
+        "hp_rtt_weight", "hp_queue_weight", "hp_prefill_rate", "hp_queue_rate",
+        "term_network", "term_prefill", "term_queue",
+        "pred_share_network", "pred_share_prefill", "pred_share_queue",
+        "meas_share_network", "meas_share_prefill", "meas_share_queue",
+    ]
     with open(csv_path, "w") as f:
-        f.write(",".join(fields + ["rtt_pred_ms", "q_pred_ms", "p_pred_ms", "ttft_pred_ms"]) + "\n")
+        f.write(",".join(fields + extra) + "\n")
         for r in records:
             p = predict(r, physical)
+            hp = with_defaults(r.get("hp"))
+            pv = r.get("_pred_terms") or {}
+            mv = r.get("_meas_terms") or {}
+            ps, ms = _shares(pv) if pv else {}, _shares(mv) if mv else {}
             vals = [r.get(k) for k in fields] + [
-                p["rtt_pred_ms"], p["q_pred_ms"], p["p_pred_ms"], p["ttft_pred_ms"]
+                p["rtt_pred_ms"], p["q_pred_ms"], p["p_pred_ms"], p["ttft_pred_ms"],
+                hp["rtt_weight"], hp["queue_weight"], hp["prefill_rate"], hp["queue_rate"],
+                pv.get("network"), pv.get("prefill"), pv.get("queue"),
+                ps.get("network"), ps.get("prefill"), ps.get("queue"),
+                ms.get("network"), ms.get("prefill"), ms.get("queue"),
             ]
             f.write(",".join("" if v is None else str(v) for v in vals) + "\n")
     print(f"[out] wrote {csv_path}")
     return summary
+
+
+def plot_tune_trajectory(steps: list[dict], summary: dict, out_prefix: str) -> None:
+    """The ES weight path, against the search box and the calibrated point.
+
+    Answers "where did the tuner actually go, and was the calibrated point even
+    available to it?" in one figure.
+    """
+    if not steps:
+        print("[plot] no tune.jsonl steps (frozen run); skipping trajectory figure")
+        return
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[plot] matplotlib not installed; skipping figures")
+        return
+
+    best = [s.get("best_params") or {} for s in steps]
+    rw = [b.get("rtt_weight") for b in best]
+    qw = [b.get("queue_weight") for b in best]
+    keep = [i for i in range(len(rw)) if isinstance(rw[i], (int, float)) and isinstance(qw[i], (int, float))]
+    if not keep:
+        print("[plot] tune steps carry no weights; skipping trajectory figure")
+        return
+    rw = [rw[i] for i in keep]
+    qw = [qw[i] for i in keep]
+    scores = [steps[i].get("best_score") for i in keep]
+    sigmas = [steps[i].get("sigma") for i in keep]
+
+    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+    rlo, rhi = PAPER_ES_BOX["rtt_weight"]
+    qlo, qhi = PAPER_ES_BOX["queue_weight"]
+    ax.add_patch(
+        plt.Rectangle((rlo, qlo), rhi - rlo, qhi - qlo, fill=False, ls="--", ec="tab:gray", lw=1.5,
+                      label="ES search box")
+    )
+    ax.plot(rw, qw, "-o", ms=3.5, lw=1, color="tab:blue", alpha=0.8, label="ES best-so-far")
+    ax.plot(rw[0], qw[0], "s", ms=9, color="tab:green", label=f"start ({rw[0]:.3g}, {qw[0]:.3g})")
+    ax.plot(rw[-1], qw[-1], "*", ms=16, color="tab:red", label=f"final ({rw[-1]:.3g}, {qw[-1]:.3g})")
+
+    reach = summary.get("box_reachability") or {}
+    exact = reach.get("exact_match_unbounded") or {}
+    if isinstance(exact.get("rtt_weight"), (int, float)):
+        ax.plot(
+            exact["rtt_weight"], exact["queue_weight"], "P", ms=13, color="tab:purple",
+            label=f"composition-calibrated ({exact['rtt_weight']:.3g}, {exact['queue_weight']:.3g})",
+        )
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("rtt_weight")
+    ax.set_ylabel("queue_weight")
+    ax.set_title("ES weight trajectory vs. search box\nand the composition-calibrated point")
+    ax.legend(fontsize=7.5, loc="best")
+
+    ax2.plot(range(len(scores)), scores, "-o", ms=3.5, color="tab:blue", label="best score (neg p95 TTFT, s)")
+    ax2.set_xlabel("ES step")
+    ax2.set_ylabel("best score")
+    ax2.legend(fontsize=8, loc="lower right")
+    ax3 = ax2.twinx()
+    ax3.plot(range(len(sigmas)), sigmas, "-", lw=1, color="tab:orange", alpha=0.7)
+    ax3.set_ylabel("sigma (orange)", color="tab:orange")
+    ax2.set_title(f"Convergence over {len(scores)} ES steps")
+
+    fig.tight_layout()
+    path = f"{out_prefix}_tune_trajectory.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"[out] wrote {path}")
 
 
 def plot(records: list[dict], summary: dict, out_prefix: str) -> None:
@@ -778,9 +1286,28 @@ def main() -> None:
     records, skipped = build_records(rows, engine)
     if not records:
         raise SystemExit(f"no requests joined; skip reasons: {skipped}")
+    steps = load_tune_trajectory(args.results_dir, args.run_prefix)
+    print(f"[load] {len(steps)} ES tuning steps")
     summary = report(records, skipped, args.out)
+    summary["tune_steps"] = len(steps)
+    if steps:
+        last = steps[-1]
+        summary["tune_final"] = {
+            "step": last.get("step"),
+            "best_params": last.get("best_params"),
+            "best_score": last.get("best_score"),
+            "sigma": last.get("sigma"),
+            "converged": last.get("converged"),
+        }
+        print(
+            f"[tune] {len(steps)} steps, final best_params={last.get('best_params')} "
+            f"best_score={last.get('best_score')} converged={last.get('converged')}"
+        )
+        with open(f"{args.out}_summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
     if not args.no_plots:
         plot(records, summary, args.out)
+        plot_tune_trajectory(steps, summary, args.out)
 
 
 if __name__ == "__main__":

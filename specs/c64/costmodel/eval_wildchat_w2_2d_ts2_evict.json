@@ -1,0 +1,56 @@
+{
+  "_note": "ABLATION: cache-eviction feedback (WildChat window 2, time_scale 2.0). Same fleet composition, window, client settings, and frozen gorgo weights as costmodel_wildchat_2d_ts2_v1 (gorgo 0.506 vs random 0.611 p95 TTFT). Two gorgo arms differing ONLY in config.trie_eviction_feedback: when true, a completed request whose engine-reported cache hit (usage.prompt_tokens_details.cached_tokens) falls short of the trie's dispatch-time prediction has the target's tags trimmed to the observed depth (RadixTrie.trim_endpoint_prefix), so the next same-prefix routing decision sees the distrust. The prediction/actual delta is traced unconditionally in BOTH arms (cached_tokens_actual / cache_illusion_tokens), so the control arm measures illusion frequency passively.\n\nExpectation stated up front: at this operating point (predicted hits ~40 tokens, low KV pressure) illusions should be rare and the gorgo arms should tie -- a no-regression check plus an illusion-frequency measurement. Run as a base spec: no tune, no eval chain.\n\nGO/NO-GO: within ~5 min of workload start confirm cached_tokens_actual is non-null in fresh trace rows -- this SGLang build's SSE usage-details support is unverified; if null, stop the app and fall back to offline measurement via engine_req_logs.",
+  "run_id": "prod_c64_costmodel_eval_wildchat_w2_2d_ts2_evict",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 2.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "us-west4",
+    "CANADA-2",
+    "sines-2"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-static-2d-ctrl",
+      "hyperparameters": {
+        "rtt_weight": 2.0,
+        "queue_weight": 0.10393626233260578,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      }
+    },
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-static-2d-evictfb",
+      "hyperparameters": {
+        "rtt_weight": 2.0,
+        "queue_weight": 0.10393626233260578,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      },
+      "config": {
+        "trie_eviction_feedback": true
+      }
+    },
+    {
+      "name": "random",
+      "label": "random"
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 100.0,
+    "on_violation": "warn"
+  }
+}

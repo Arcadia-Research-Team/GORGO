@@ -141,6 +141,14 @@ KNOWN_REPLICA_REGIONS: tuple[str, ...] = (
     "northeurope",
     "malaysiawest",
     "us-east",
+    # Coarse geographies (see ENGINE_BY_REGION in the experiment controller):
+    # same tier, far better schedulability, used as the fallback when a
+    # specific region has no capacity. Safe to list alongside the specific
+    # names because _infer_replica_region_from_key matches longest-first, so
+    # a key ending in "-us-ashburn-1" still resolves to "us-ashburn-1".
+    "ap",
+    "eu",
+    "us",
 )
 
 
@@ -416,6 +424,18 @@ def proxy(registry_key: str = ""):
         # ``POST /config`` and stamped onto each request trace event so a
         # calibration run can tell which semantics produced it.
         "load_release_at_ttft": False,
+        # Cache-eviction feedback. When True, a completed request whose
+        # engine-reported cache hit (``usage.prompt_tokens_details
+        # .cached_tokens``) falls short of the trie's dispatch-time
+        # prediction has the target's tags trimmed to the observed depth
+        # along the request's path (``RadixTrie.trim_endpoint_prefix``).
+        # This makes the trie deliberately pessimistic about that prefix
+        # until the next same-prefix dispatch re-inserts it -- an observed
+        # eviction reduces the cache-affinity pull for exactly one future
+        # routing decision. Off by default; toggled via ``POST /config``.
+        # The prediction/actual delta is traced unconditionally either way
+        # (``cached_tokens_actual`` / ``cache_illusion_tokens``).
+        "trie_eviction_feedback": False,
         # Live physical-rate calibration accumulator (regression, not ratios).
         # We fit ``ttft_ms ~ intercept_r + P*uncached + Q*queued`` by ordinary
         # least squares using ONLY proxy-measured TTFT and the proxy's own
@@ -1265,6 +1285,7 @@ def proxy(registry_key: str = ""):
         more boolean/scalar knobs can be added without changing callers."""
         return {
             "load_release_at_ttft": bool(state.get("load_release_at_ttft")),
+            "trie_eviction_feedback": bool(state.get("trie_eviction_feedback")),
         }
 
     async def _handle_get_config(_data) -> tuple[int, dict]:
@@ -1279,6 +1300,12 @@ def proxy(registry_key: str = ""):
                 return 400, {"error": "load_release_at_ttft must be true/false"}
             state["load_release_at_ttft"] = val
             _log(f"config load_release_at_ttft set to {val}")
+        if "trie_eviction_feedback" in data:
+            val = _parse_optional_bool(data, "trie_eviction_feedback")
+            if val is None:
+                return 400, {"error": "trie_eviction_feedback must be true/false"}
+            state["trie_eviction_feedback"] = val
+            _log(f"config trie_eviction_feedback set to {val}")
         return 200, {"config": _config_payload()}
 
     def _accumulate_calibration(
@@ -1710,17 +1737,29 @@ def proxy(registry_key: str = ""):
                 else HYPERPARAM_RANGES
             )
             at["hyperparam_ranges"] = active_ranges
-            seed = {k: float(seed_defaults.get(k, v)) for k, v in active_ranges.items()}
+            # ``seed_params`` is the ES starting point; ``rng_seed`` is the RNG
+            # seed. These used to share the name ``seed``, which is why a
+            # spec-supplied ``auto_tune.seed`` was silently dropped: the
+            # controller forwards it in the POST body, but nothing here read
+            # it, so every online-ES run was nondeterministic.
+            seed_params = {k: float(seed_defaults.get(k, v)) for k, v in active_ranges.items()}
+            rng_seed = data.get("seed")
             need_new_tuner = (
                 at.get("online_tuner") is None or was_mode != "online-es" or not was_enabled
             )
             if need_new_tuner:
                 at["online_tuner"] = GaussianESTuner(
-                    initial_params=seed,
+                    initial_params=seed_params,
                     ranges=active_ranges,
-                    sigma=0.5,
-                    sigma_min=0.05,
+                    # Spec-overridable. A run whose first window lands in a
+                    # startup transient can spend its whole sigma budget
+                    # before conditions settle; at the floor ``propose()``
+                    # returns None and pins whatever ``best_params`` holds --
+                    # the seed itself, if nothing was ever accepted.
+                    sigma=float(data.get("sigma", 0.5)),
+                    sigma_min=float(data.get("sigma_min", 0.05)),
                     max_steps=10_000,
+                    seed=int(rng_seed) if rng_seed is not None else None,
                 )
                 at["pending_candidate"] = None
                 at["pending_started_at_count"] = state["total_samples_appended"]
@@ -2702,10 +2741,14 @@ def proxy(registry_key: str = ""):
         # trace record) agrees on a single value even if /config flips it
         # mid-stream.
         release_at_ttft = bool(state.get("load_release_at_ttft"))
+        # Snapshot the eviction-feedback flag at dispatch for the same
+        # reason: the completion hook and the trace record must agree.
+        eviction_feedback = bool(state.get("trie_eviction_feedback"))
         request_trace_event = {
             "kind": "request",
             "trace_id": state["trace"]["trace_id"],
             "load_release_at_ttft": release_at_ttft,
+            "trie_eviction_feedback": eviction_feedback,
             "request_id": request_id,
             "trace_row_index": trace_row_index,
             "source_row_id": source_row_id,
@@ -2732,6 +2775,19 @@ def proxy(registry_key: str = ""):
             "prompt_tokens": None,
             "completion_tokens": None,
             "meta_info": None,
+            # Engine-reported prefix-cache hit at service time
+            # (usage.prompt_tokens_details.cached_tokens); None when the
+            # server does not emit the field or the request never reached
+            # the usage event.
+            "cached_tokens_actual": None,
+            # Signed prediction error in *proxy* token base:
+            # cached_tokens_at_dispatch minus the engine's actual hit
+            # (normalized for the proxy/engine tokenizer offset). Positive
+            # = the trie over-promised ("cache illusion").
+            "cache_illusion_tokens": None,
+            # Node tags removed by the eviction-feedback trim (0 when the
+            # flag is off, no shortfall was observed, or the trim failed).
+            "trie_trimmed_tags": 0,
             "error": None,
         }
 
@@ -2907,6 +2963,7 @@ def proxy(registry_key: str = ""):
                         prompt_tokens,
                         completion_tokens,
                         meta_info,
+                        cached_tokens_actual,
                     ) = await consume_sse_stream(
                         upstream,
                         request_start_ns=request_start_ns,
@@ -2914,6 +2971,49 @@ def proxy(registry_key: str = ""):
                         on_first_token=_release_counters if release_at_ttft else None,
                     )
                     request_trace_event["meta_info"] = meta_info
+                    request_trace_event["cached_tokens_actual"] = cached_tokens_actual
+                    # SGLang's UsageProcessor emits prompt_tokens_details only
+                    # when cached_tokens > 0 (``_details_if_cached``), so with
+                    # --enable-cache-report on the engines a null simply means
+                    # "zero cached". The feedback flag asserts the engines run
+                    # with that flag, so treat null as 0 there; without the
+                    # flag null stays None (can't distinguish "no report"
+                    # from "no hit") and only the instrumentation suffers.
+                    if (
+                        cached_tokens_actual is None
+                        and eviction_feedback
+                        and prompt_tokens is not None
+                    ):
+                        cached_tokens_actual = 0
+                    if cached_tokens_actual is not None:
+                        # The engine tokenizes with the served chat template,
+                        # the proxy with its own apply_chat_template -- their
+                        # token counts differ by a small per-request offset
+                        # (template scaffolding). Shift the engine's count
+                        # into the proxy's base before differencing so the
+                        # illusion measure isn't dominated by that offset.
+                        offset = 0
+                        if prompt_tokens is not None and request_tokens:
+                            offset = max(0, prompt_tokens - request_tokens)
+                        actual_proxy_base = max(0, cached_tokens_actual - offset)
+                        illusion = cached_for_target - actual_proxy_base
+                        request_trace_event["cache_illusion_tokens"] = illusion
+                        if eviction_feedback and token_ids and illusion > 0:
+                            # The engine served fewer cached tokens than the
+                            # trie promised: the prefix beyond the observed
+                            # depth was evicted at some point before service.
+                            # Trim the target's tags to the observed depth so
+                            # the next same-prefix routing decision sees the
+                            # distrust (its own dispatch re-inserts the path).
+                            try:
+                                request_trace_event["trie_trimmed_tags"] = (
+                                    radix_trie.trim_endpoint_prefix(
+                                        token_ids, target, actual_proxy_base
+                                    )
+                                )
+                            except Exception as e:
+                                # Trie bookkeeping must never break forwarding.
+                                _log(f"radix trie eviction trim failed: {e}")
                     # Feed the live regression accumulator (only while a
                     # calibrate run is active, so tuning/eval traffic doesn't
                     # pollute the fit). Uses proxy-measured TTFT + the proxy's

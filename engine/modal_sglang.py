@@ -197,6 +197,12 @@ def model_endpoint(registry_key: str = REGION):
         "--cuda-graph-max-bs",  # only capture CUDA graphs for batch sizes we're likely to observe
         f"{10 * 2}",
         "--enable-metrics",  # expose metrics endpoints for telemetry
+        # Populate ``usage.prompt_tokens_details.cached_tokens`` on every
+        # OpenAI-compatible response (off by default in SGLang; verified
+        # null without it on this build). The proxy's cache-eviction
+        # feedback compares this served-cache truth against its radix-trie
+        # prediction, so without the flag the whole feedback path is inert.
+        "--enable-cache-report",
         "--decode-log-interval",  # how often to log during decoding, in tokens
         "100",
         "--mem-fraction",  # leave space for speculative model

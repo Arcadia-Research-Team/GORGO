@@ -1,0 +1,10 @@
+{
+  "_note": "Same window as manifest_prod_decoded_apr7_1945_2015.json (April 7 19:45-20:15 high-diversity held-out window, paper v3 Table 2 third block) but pointing at the actual on-volume filename: the published manifests were sanitized prod_* while the files on the private volume are glm5_*. Requires GORGO_COMPLETIONS_VOLUME=GORGO-glm5-completions mounted at /data.",
+  "top": [
+    {
+      "result": {
+        "output_path": "/data/mooncake_traces/decoded/glm5_decoded_apr7_1945_to_2015.jsonl"
+      }
+    }
+  ]
+}

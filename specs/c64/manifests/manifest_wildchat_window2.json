@@ -1,0 +1,10 @@
+{
+  "_note": "WildChat-4.8M replay window 2 -- held-out eval window for the 2D-cost-model WildChat rerun (window 1 is the tuning window; window 2 was never used in the paper). Same builder settings as window 1: Mooncake format with bodies, synthetic Poisson arrivals. Requires GORGO_COMPLETIONS_VOLUME=GORGO-glm5-completions mounted at /data.",
+  "top": [
+    {
+      "result": {
+        "output_path": "/data/mooncake_traces/abstract_night_traces/with_bodies/wildchat_window2.jsonl"
+      }
+    }
+  ]
+}

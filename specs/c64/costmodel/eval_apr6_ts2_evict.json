@@ -1,0 +1,56 @@
+{
+  "_note": "ABLATION: cache-eviction feedback on ART-Chat (Apr 6 15:05-15:35 held-out paper window, time_scale 2.0). Companion to costmodel_wildchat_evictfb_v5, which established the mechanism fires but is routing-neutral on a cache-dead workload (WildChat: 3 real engine hits in 61k requests, phantom credit p50 3 tokens). ART-Chat is where the reviewer's cache-illusion question has teeth: engine logs from prior runs on this stack show 20-30% of requests with real hits, p50 ~6-8k tokens, under KV pool churn.\n\nTwo gorgo-2d arms with identical frozen paper weights (w_rtt=0.276, w_queue=0.5, learned on the Apr 5 window per paper v3) differing ONLY in config.trie_eviction_feedback; random as the ambient-variance control. Engines run --enable-cache-report; under the feedback flag a null usage.prompt_tokens_details means zero cached (SGLang emits details only when count > 0). The prediction/actual delta is traced unconditionally in both gorgo arms.\n\nHypothesis: with real multi-thousand-token hits, an observed eviction revokes credit worth hundreds of score units (vs ~3-40 on WildChat), so feedback should visibly shift routing on conversations whose prefix died -- measure TTFT tails plus illusion frequency/magnitude. Run as a base spec: no tune, no eval chain.",
+  "run_id": "prod_c64_costmodel_eval_apr6_ts2_evict",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 2.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "us-west4",
+    "CANADA-2",
+    "sines-2"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-static-2d-ctrl",
+      "hyperparameters": {
+        "rtt_weight": 0.276,
+        "queue_weight": 0.5,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      }
+    },
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-static-2d-evictfb",
+      "hyperparameters": {
+        "rtt_weight": 0.276,
+        "queue_weight": 0.5,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      },
+      "config": {
+        "trie_eviction_feedback": true
+      }
+    },
+    {
+      "name": "random",
+      "label": "random"
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 100.0,
+    "on_violation": "warn"
+  }
+}

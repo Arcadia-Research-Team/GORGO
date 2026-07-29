@@ -1,0 +1,47 @@
+{
+  "_note": "HETEROGENEOUS-FLEET CHARACTERIZATION, phase 2 of 2: HELD-OUT EVAL. Apr 6 15:05-15:35 at time_scale=2.0 -- the paper's eval window and load point, directly comparable to the homogeneous H100 run in results/analysis/h100tuned_eval_ts2_summary.json.\n\nDeploy-and-freeze. The hyperparameters below are PLACEHOLDERS: the tune->eval chain overwrites them with the 3D weights learned on Apr 5 (rtt_weight, queue_weight, prefill_rate). If hyperparameters_at_decision shows 0.5 / 0.1 / 1.0, the patch did not take and the run is invalid.\n\nThe reference pin (us-west4 H100 at prefill_rate=1.0) and the measured queue_rate normalization both persist on the reused proxy -- merge_update(replace=False) preserves per_target when the chain posts flat learned defaults. They are re-declared here only so a mid-eval proxy respawn can restore them.\n\nVERIFY: in the eval per-request log, hp_prefill_rate must be 1.0 on every us-west4 row and equal to the learned ratio on every eu-frankfurt-1 row. Constant across all rows means the pin was lost and the ratio went fleet-wide, silently collapsing this to a rescaled 2D run.\n\nLabel must match tune_apr5_hetero.json's or the chain cannot find the fleet.",
+  "run_id": "prod_c64_costmodel_eval_apr6_hetero_ts2",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 2.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "eu-frankfurt-1",
+    "us-west4"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-hillclimb-p95-3d",
+      "hyperparameters": {
+        "rtt_weight": 0.5,
+        "queue_weight": 0.1,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      },
+      "per_target_hyperparameters_by_region": {
+        "us-west4": {
+          "prefill_rate": 1.0
+        }
+      }
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 100.0,
+    "on_violation": "warn"
+  },
+  "queue_kv_capacity_normalization": {
+    "enabled": true,
+    "reference_region": "us-west4"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "_note": "WildChat-4.8M replay window 1 (Mooncake format with bodies, synthetic Poisson arrivals at 11.4 rps over 30 min -- WildChat has no usable arrival timestamps, so the builder synthesized them; see the colocated .summary.json on the volume). 20,520 rows, avg input ~840 tokens, block reuse 4.95%. Tuning window for the 2D-cost-model WildChat rerun. Requires GORGO_COMPLETIONS_VOLUME=GORGO-glm5-completions mounted at /data.",
+  "top": [
+    {
+      "result": {
+        "output_path": "/data/mooncake_traces/abstract_night_traces/with_bodies/wildchat_window1.jsonl"
+      }
+    }
+  ]
+}

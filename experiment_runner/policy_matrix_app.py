@@ -85,6 +85,12 @@ def _serve_model(registry_key: str, tp_size: int | None = None) -> None:
         "--cuda-graph-max-bs",
         f"{10 * 2}",
         "--enable-metrics",
+        # Populate ``usage.prompt_tokens_details.cached_tokens`` on every
+        # OpenAI-compatible response (off by default; verified null without
+        # it on this build). Required by the proxy's cache-eviction
+        # feedback, which compares this served-cache truth against its
+        # radix-trie prediction. Keep in sync with engine/modal_sglang.py.
+        "--enable-cache-report",
         "--decode-log-interval",
         "100",
         "--mem-fraction",
@@ -446,6 +452,20 @@ def _label(policy: dict) -> str:
     return policy.get("label") or policy["name"]
 
 
+# Policy names whose proxies carry tunable gorgo weights. Kept in sync with the
+# guards in proxy/modal_proxy.py (``normalize_policy(...) in {"gorgo",
+# "gorgo-2d"}``). The tune -> eval chain used to compare against the bare string
+# "gorgo", which silently skipped every ``gorgo-2d`` run: learned weights were
+# never patched into the eval spec and the tuner was never disabled.
+_GORGO_POLICY_NAMES = {"gorgo", "gorgo-2d"}
+
+
+def _is_gorgo_policy(name: str | None) -> bool:
+    if not name:
+        return False
+    return name.strip().replace("_", "-").lower() in _GORGO_POLICY_NAMES
+
+
 def _homogeneity_config(spec: dict) -> dict:
     """Resolve the optional pre-flight replica homogeneity check config.
 
@@ -577,6 +597,12 @@ def _capture_environment(base_spec: dict, sweep_manifest: dict) -> dict:
         "tensor_parallel_size": N_GPUS,
         "environment_name": ENVIRONMENT_NAME,
         "fleet": {
+            # Per-region, because a fleet may be heterogeneous: each region's
+            # engine function carries its own ``gpu=`` decorator, so the
+            # scalar FLEET_GPU misreports a mixed fleet. Kept alongside for
+            # back-compat with readers of older manifests.
+            "gpu_by_region": {r: GPU_BY_REGION.get(r) for r in fleet_regions},
+            "heterogeneous": len({GPU_BY_REGION.get(r) for r in fleet_regions}) > 1,
             "gpu": FLEET_GPU,
             "tp_size": FLEET_TP_SIZE,
             "regions": fleet_regions,
@@ -1238,7 +1264,127 @@ def _auto_tune_payload(policy_spec: dict, *, global_seed: int | None = None) -> 
     # bounds instead of its hardcoded defaults.
     if "hyperparam_ranges" in auto:
         payload["hyperparam_ranges"] = auto["hyperparam_ranges"]
+    # ES step-size knobs. Previously hardcoded proxy-side, which made the
+    # sigma floor untunable from the spec -- a run that stalls before
+    # conditions settle hits it and pins the seed weights.
+    for k in ("sigma", "sigma_min"):
+        if k in auto:
+            payload[k] = float(auto[k])
     return payload
+
+
+async def _post_per_target_overrides(
+    url: str,
+    policy_spec: dict,
+    replica_entries: list[dict],
+) -> dict | None:
+    """Apply the spec's ``per_target_hyperparameters_by_region`` block.
+
+    Replica URLs only exist once the fleet is up, so the spec keys these
+    overrides by region and we resolve them here. Must run *after*
+    ``POST /replicas``: ``gorgo.policy.gorgo.validate_update`` rejects
+    ``per_target`` URLs that are not currently registered.
+
+    This is what pins the reference hardware class on a heterogeneous fleet.
+    ``route_gorgo_2d`` resolves ``prefill_rate`` per replica through
+    ``effective_hyperparameters``, so the ES can keep searching it in
+    ``defaults`` -- where it lands on every replica *without* an override --
+    while the reference replica is held at 1.0 here. That turns the searched
+    value into a ratio against the reference and leaves exactly K-1 free
+    scale parameters for K hardware classes instead of K, which is what
+    keeps the search space from carrying a flat direction.
+
+    Returns the resolved ``{url: overrides}`` map, or None when the spec
+    declares nothing.
+    """
+    by_region = policy_spec.get("per_target_hyperparameters_by_region") or {}
+    if not by_region or not replica_entries:
+        return None
+    per_target = {
+        e["url"]: dict(by_region[e["replica_region"]])
+        for e in replica_entries
+        if e.get("replica_region") in by_region
+    }
+    if not per_target:
+        return None
+    await _post_json(url, "/hyperparameters", {"per_target": per_target})
+    return per_target
+
+
+async def _apply_kv_capacity_queue_normalization(
+    fleet_manifest: dict,
+    base_spec: dict,
+) -> dict | None:
+    """Scale each replica's queue term by its KV headroom.
+
+    ``queued_tokens`` is a raw count, so the same value means very different
+    things on replicas with different KV budgets. On a homogeneous fleet that
+    is harmless -- the difference is common-mode and cancels in the argmin --
+    but a mixed fleet breaks that, and the queue term silently starts
+    comparing incomparable quantities.
+
+    ``queue_rate_r = cap_ref / cap_r``, so a replica with *less* headroom gets
+    a *larger* coefficient: one queued token consumes more of what it has. The
+    reference class lands on exactly 1.0, which preserves the gauge and keeps
+    the learned ``queue_weight`` comparable with the homogeneous runs. No
+    search dimension is spent -- this is measured, not tuned.
+
+    Capacity is a runtime property (GPU memory x TP degree x
+    ``mem_fraction_static``), so it is read from each engine's
+    ``/get_server_info`` rather than pinned in the spec. Best-effort: a
+    replica we cannot query is left unscaled and reported rather than
+    failing the run.
+    """
+    cfg = base_spec.get("queue_kv_capacity_normalization") or {}
+    if not cfg.get("enabled"):
+        return None
+    ref_region = cfg.get("reference_region")
+    report: dict = {"reference_region": ref_region, "per_fleet": {}}
+
+    for fleet_entry in fleet_manifest.get("fleets") or []:
+        entries = fleet_entry.get("replica_entries") or []
+        caps: dict[str, int] = {}
+        for e in entries:
+            try:
+                info = await _get_json(e["url"], "/get_server_info", retries=1)
+            except Exception as exc:
+                print(
+                    f"[queue-norm][warn] {e.get('replica_region')}: /get_server_info "
+                    f"failed ({type(exc).__name__}); replica left unscaled",
+                    flush=True,
+                )
+                continue
+            cap = info.get("max_total_num_tokens")
+            if isinstance(cap, int) and cap > 0:
+                caps[e["url"]] = cap
+        if len(caps) < 2:
+            print(
+                f"[queue-norm][warn] {fleet_entry.get('label')}: resolved "
+                f"{len(caps)} capacities, need >=2; skipping normalization",
+                flush=True,
+            )
+            continue
+
+        by_region = {e["replica_region"]: e["url"] for e in entries}
+        ref_url = by_region.get(ref_region) if ref_region else None
+        ref_cap = caps.get(ref_url) if ref_url else None
+        if ref_cap is None:
+            # No reference declared (or it failed to answer): anchor on the
+            # largest, so every coefficient is >= 1 and none is scaled down.
+            ref_cap = max(caps.values())
+
+        per_target = {u: {"queue_rate": ref_cap / c} for u, c in caps.items()}
+        await _post_json(fleet_entry["proxy_url"], "/hyperparameters", {"per_target": per_target})
+        detail = {
+            e["replica_region"]: {
+                "max_total_num_tokens": caps.get(e["url"]),
+                "queue_rate": per_target.get(e["url"], {}).get("queue_rate"),
+            }
+            for e in entries
+        }
+        report["per_fleet"][fleet_entry["label"]] = detail
+        print(f"[queue-norm] {fleet_entry['label']}: {detail}", flush=True)
+    return report
 
 
 async def _respawn_proxy(policy_spec: dict, timeout_s: float = 120.0) -> str:
@@ -1295,6 +1441,20 @@ async def _run_one_policy(global_spec: dict, policy_spec: dict) -> dict:
         await _post_json(url, "/policy", {"policy": name})
     if policy_spec.get("hyperparameters"):
         await _post_json(url, "/hyperparameters", policy_spec["hyperparameters"])
+    # Re-applied here (not only at fleet setup) so a proxy respawn, which
+    # re-posts /replicas onto a fresh container, does not silently drop the
+    # reference-class pin and leave the ES ratio applying to every replica.
+    pinned = await _post_per_target_overrides(
+        url, policy_spec, policy_spec.get("_replica_entries") or []
+    )
+    if pinned:
+        print(f"[fleet] {label}: pinned per-replica hyperparameters {pinned}", flush=True)
+    # Spec-driven proxy runtime config (e.g. trie_eviction_feedback). Posted
+    # per-run, not just at fleet setup, so a respawned proxy container (which
+    # starts from config defaults) is re-configured before traffic.
+    if isinstance(policy_spec.get("config"), dict) and policy_spec["config"]:
+        cfg = await _post_json(url, "/config", policy_spec["config"])
+        print(f"[config] {label}: {cfg.get('config')}", flush=True)
     await _post_json(url, "/flush", {})
     global_seed = global_spec.get("seed")
     auto_tune_config = _auto_tune_payload(policy_spec, global_seed=global_seed)
@@ -1640,6 +1800,12 @@ async def _run_policy_matrix_experiment_inner(
         await _post_json(proxy_url, "/policy", {"policy": policy["name"]})
         if policy.get("hyperparameters"):
             await _post_json(proxy_url, "/hyperparameters", policy["hyperparameters"])
+        pinned = await _post_per_target_overrides(proxy_url, policy, policy_replica_entries)
+        if pinned:
+            print(f"[fleet] {label}: pinned per-replica hyperparameters {pinned}", flush=True)
+        if isinstance(policy.get("config"), dict) and policy["config"]:
+            cfg = await _post_json(proxy_url, "/config", policy["config"])
+            print(f"[config] {label}: {cfg.get('config')}", flush=True)
         p = deepcopy(policy)
         p["proxy_url"] = proxy_url
         p["_proxy_key"] = proxy_key
@@ -1654,6 +1820,11 @@ async def _run_policy_matrix_experiment_inner(
                 "proxy_url": proxy_url,
                 "replica_keys": policy_replica_keys,
                 "replica_urls": policy_replica_urls,
+                # Full (url, key, region) triples: the eval phase needs the
+                # region to re-resolve per-target hyperparameter pins, which
+                # replica_urls alone cannot express.
+                "replica_entries": policy_replica_entries,
+                "gpu_by_region": {r: GPU_BY_REGION.get(r) for r in regions},
             }
         )
 
@@ -1669,6 +1840,13 @@ async def _run_policy_matrix_experiment_inner(
         cleanup_callback=_abort_cleanup,
     )
     fleet_manifest["homogeneity_check"] = homogeneity_report
+
+    # Runs after the homogeneity probes (so every engine has answered at
+    # least once) and before any workload traffic, so no request is scored
+    # with an un-normalized queue term.
+    fleet_manifest["queue_kv_capacity_normalization"] = (
+        await _apply_kv_capacity_queue_normalization(fleet_manifest, base_spec)
+    )
 
     # Write run manifest once the fleet is fully provisioned and validated.
     # Updated again after workloads complete with result paths and timing.
@@ -1726,7 +1904,7 @@ async def _run_policy_matrix_experiment_inner(
 
                 eval_spec = deepcopy(eval_spec_raw)
                 for p in eval_spec.get("policies", []):
-                    if p.get("name") == "gorgo":
+                    if _is_gorgo_policy(p.get("name")):
                         p["hyperparameters"] = learned
                         print(
                             f"[tune→eval][{eval_idx}] patched gorgo policy "
@@ -1745,9 +1923,21 @@ async def _run_policy_matrix_experiment_inner(
                 for fleet_entry in fleet_manifest["fleets"]:
                     proxy_url = fleet_entry["proxy_url"]
                     policy_name = fleet_entry["policy"]
-                    if policy_name == "gorgo":
-                        await _post_json(proxy_url, "/tune", {"enabled": False})
+                    # Disable the tuner on every proxy, not just gorgo ones. The
+                    # eval spec's policy usually carries no ``auto_tune`` block,
+                    # and ``_auto_tune_payload`` returns None in that case, so
+                    # ``_run_one_policy`` makes no /tune call at all -- leaving
+                    # whatever tuner state the tuning phase left behind live on
+                    # the reused proxy. The POST is inert where nothing is
+                    # tuning, so it is safe to send unconditionally.
+                    await _post_json(proxy_url, "/tune", {"enabled": False})
+                    if _is_gorgo_policy(policy_name):
                         await _post_json(proxy_url, "/hyperparameters", learned)
+                        print(
+                            f"[tune→eval][{eval_idx}] froze {policy_name!r} proxy "
+                            f"at learned weights {learned}",
+                            flush=True,
+                        )
                     await _post_json(proxy_url, "/flush", {})
 
                 eval_launched = deepcopy(eval_spec)
@@ -1759,6 +1949,16 @@ async def _run_policy_matrix_experiment_inner(
                     if matching:
                         ep = deepcopy(p)
                         ep["proxy_url"] = matching[0]["proxy_url"]
+                        # Carry the fleet's replica identity into the eval
+                        # policy so a mid-eval proxy respawn can re-apply the
+                        # per-target pins. The pins themselves survive the
+                        # normal path already -- merge_update(replace=False)
+                        # preserves per_target when the chain posts the flat
+                        # learned weights -- but a respawned container starts
+                        # from an empty store.
+                        ep["_proxy_key"] = matching[0].get("proxy_key")
+                        ep["_replica_urls"] = matching[0].get("replica_urls")
+                        ep["_replica_entries"] = matching[0].get("replica_entries")
                         eval_launched["policies"].append(ep)
                     else:
                         print(

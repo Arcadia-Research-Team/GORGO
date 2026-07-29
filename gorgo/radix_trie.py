@@ -226,6 +226,54 @@ class RadixTrie:
             i += j
         return result
 
+    def trim_endpoint_prefix(self, seq, endpoint: str, keep_len: int) -> int:
+        """Remove ``endpoint``'s tag from every node on ``seq``'s path whose
+        prefix-end depth exceeds ``keep_len``; returns tags removed.
+
+        Used for cache-eviction feedback: the engine reported that only the
+        first ``keep_len`` tokens of ``seq`` were actually cached on
+        ``endpoint`` at service time, so tags crediting a longer prefix are
+        stale. Granularity is node-level -- a node whose edge *spans*
+        ``keep_len`` is untagged too (no node split), so afterwards
+        ``cached_prefix_length(seq, endpoint)`` returns at most ``keep_len``
+        (conservative under-credit until the next insert re-tags the path).
+
+        The walk follows ``seq`` with the same descent rules as
+        :meth:`cached_prefix_length`, but does *not* stop at untagged
+        nodes -- deeper nodes on the path may still carry the tag (e.g.
+        after an earlier partial trim), so the full matched path is swept.
+        Tags on diverging branches are untouched: only nodes whose prefix
+        is a prefix of ``seq`` are visited.
+        """
+        n = len(seq)
+        removed = 0
+        node = self.root
+        i = 0
+        while i < n:
+            child = node.children.get(seq[i])
+            if child is None:
+                break
+            edge = child.edge
+            elen = len(edge)
+            remaining = n - i
+            cap = elen if elen < remaining else remaining
+            j = 1  # seq[i] == edge[0] by dispatch
+            while j < cap and edge[j] == seq[i + j]:
+                j += 1
+            if i + j > keep_len:
+                eps = child.replica_endpoints
+                if eps and endpoint in eps:
+                    eps.remove(endpoint)
+                    removed += 1
+                    if not eps:
+                        child.replica_endpoints = None
+            if j < elen:
+                # Partial edge match -- no further descent possible.
+                break
+            node = child
+            i += j
+        return removed
+
     def remove_endpoint(self, endpoint: str) -> int:
         """Drop every ``endpoint`` tag in the trie; returns tags removed.
 

@@ -1,0 +1,55 @@
+{
+  "_note": "COST-MODEL VALIDATION, phase 1 of 3: TUNING. Reproduces paper v3's tuning protocol (Apr 5 16:15-16:45, time_scale=1.0, ES over (rtt_weight, queue_weight) minimizing p95 TTFT) on the H100:1 AZR fleet instead of L40S:2, so the weights the component analysis is judged against were learned on the same hardware they are evaluated on.\n\nWhy this run exists: the first validation deployed the paper's frozen L40S-learned weights (rtt=0.276, queue=0.5) on H100. Any miscalibration found there is confounded between 'the cost model is wrong' and 'these weights were never for this hardware'. Retuning here closes that.\n\nDeviations from specs/c64/tuning/policy_matrix_c64_tuning_p95ttft_2d.json, both deliberate:\n  1. fleet_regions are the H100:1 AZR regions (centralus / northeurope / malaysiawest). L40S:2 in ap-seoul-1 / eu-frankfurt-1 / us-ashburn-1 was unschedulable.\n  2. Only the gorgo-2d arm. Each policy gets its OWN 3-replica fleet, so the paper's 5-policy matrix would mean 15 H100s. We are validating the cost model, not reproducing the tuning-window baseline comparison.\nEverything else -- ES box, initial weights, window/hop, objective -- is the paper's.\n\nChain this into eval with --eval-spec-path; requires REQUEST_TIMING_LOG=1 and GORGO_COMPLETIONS_VOLUME=GORGO-glm5-completions.",
+  "run_id": "prod_c64_costmodel_tune_apr5_h100",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 1.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "centralus",
+    "northeurope",
+    "malaysiawest"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-hillclimb-p95-2d",
+      "hyperparameters": {
+        "rtt_weight": 0.5,
+        "queue_weight": 0.1
+      },
+      "auto_tune": {
+        "enabled": true,
+        "window_size": 128,
+        "hop_size": 32,
+        "apply": true,
+        "mode": "online-es",
+        "objective_metric": "neg_p95_ttft",
+        "hyperparam_ranges": {
+          "rtt_weight": [
+            0.05,
+            2.0
+          ],
+          "queue_weight": [
+            0.05,
+            0.5
+          ]
+        }
+      }
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 3.0,
+    "on_violation": "warn"
+  }
+}

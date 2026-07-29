@@ -27,7 +27,8 @@ Building blocks::
     consume_sse_stream(resp, *, request_start_ns)
         Drain an OpenAI-compatible SSE chat-completions response with
         chunk-arrival-precise timing. Returns ``(ttft_ns, output_tokens,
-        prompt_tokens, completion_tokens)``. The caller MUST capture
+        prompt_tokens, completion_tokens, meta_info,
+        cached_tokens_actual)``. The caller MUST capture
         ``request_start_ns`` *before* awaiting ``client.stream(...)`` so
         TTFT includes request-send and response-header latency.
 
@@ -124,9 +125,10 @@ async def consume_sse_stream(
     request_start_ns: int,
     chunk_sink: Callable[[bytes], Awaitable[None]] | None = None,
     on_first_token: Callable[[], None] | None = None,
-) -> tuple[int | None, int, int | None, int | None, dict | None]:
+) -> tuple[int | None, int, int | None, int | None, dict | None, int | None]:
     """Drain an SSE chat-completions response, returning
-    ``(ttft_ns, output_tokens, prompt_tokens, completion_tokens, meta_info)``.
+    ``(ttft_ns, output_tokens, prompt_tokens, completion_tokens, meta_info,
+    cached_tokens_actual)``.
 
     ``ttft_ns`` is the wire-arrival time -- relative to the caller-supplied
     ``request_start_ns`` -- of the chunk that delivered the first byte of
@@ -156,12 +158,21 @@ async def consume_sse_stream(
     timing fields (``queue_time``, ``prefill_waiting_latency``,
     ``e2e_latency``, ``cached_tokens``, ``*_ts`` wall-clock timestamps,
     ...). ``None`` when the stream surfaces no such object.
+
+    ``cached_tokens_actual`` is the engine-reported prefix-cache hit for
+    this request, from ``usage.prompt_tokens_details.cached_tokens`` on the
+    final usage event (OpenAI-compatible field; SGLang populates it from
+    RadixAttention). This is the *served* cache reality, as opposed to the
+    proxy trie's dispatch-time prediction -- their difference is the
+    "cache illusion" (prefix evicted between prediction and service).
+    ``None`` when the server does not emit ``prompt_tokens_details``.
     """
     ttft_ns: int | None = None
     output_tokens = 0
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     meta_info: dict | None = None
+    cached_tokens_actual: int | None = None
 
     buffer = bytearray()
     # Wire-arrival time of the chunk that delivered the first byte
@@ -211,6 +222,11 @@ async def consume_sse_stream(
                         prompt_tokens = pt
                     if isinstance(ct, int):
                         completion_tokens = ct
+                    details = usage.get("prompt_tokens_details")
+                    if isinstance(details, dict):
+                        cached = details.get("cached_tokens")
+                        if isinstance(cached, int):
+                            cached_tokens_actual = cached
                 # Capture per-request meta_info wherever it shows up.
                 # SGLang may surface it top-level on the event or nested
                 # under choices[0]; keep the last-seen dict so the final
@@ -242,7 +258,14 @@ async def consume_sse_stream(
                     # SGLang's streaming output.
                     output_tokens += 1
 
-    return ttft_ns, output_tokens, prompt_tokens, completion_tokens, meta_info
+    return (
+        ttft_ns,
+        output_tokens,
+        prompt_tokens,
+        completion_tokens,
+        meta_info,
+        cached_tokens_actual,
+    )
 
 
 async def ping_once(
@@ -324,6 +347,7 @@ async def measure_chat_completion(
                 prompt_tokens,
                 completion_tokens,
                 _meta_info,
+                _cached_tokens_actual,
             ) = await consume_sse_stream(resp, request_start_ns=request_start_ns)
     except Exception:
         return None

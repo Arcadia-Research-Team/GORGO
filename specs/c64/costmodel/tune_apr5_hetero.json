@@ -1,0 +1,72 @@
+{
+  "_note": "HETEROGENEOUS-FLEET CHARACTERIZATION, phase 1 of 2: TUNING (3D). Answers reviewer Q2 -- how GORGO's weights adapt on mixed hardware -- by measuring where the ES puts the cross-SKU prefill ratio when allowed to learn it.\n\nFLEET: two replicas, two hardware classes. eu-frankfurt-1 is L40S:2 (tp=2), us-west4 is H100:1; each region's engine function carries its own gpu= decorator, so GPU_BY_REGION assigns these automatically. malaysiawest was the original AP choice (giving a ~595ms vs ~90ms RTT spread) but H100 capacity there was unschedulable. us-west4 narrows the RTT gap, which is a net positive for THIS measurement: with distance nearly equalized, routing decisions turn on compute speed, which is exactly what the ratio parameter governs. It does weaken the cross-region story, so report the geometry honestly.\n\nSEARCH SPACE (3D, one more than the paper's 2D):\n  rtt_weight    [0.05, 2.0]  -- paper box, unchanged\n  queue_weight  [0.05, 0.5]  -- paper box, unchanged\n  prefill_rate  [0.5, 8.0]   -- NEW. The cross-SKU ratio.\n\nprefill_rate is the coefficient multiplying `uncached` in route_gorgo_2d -- NOT a fitted ms/token physical rate, despite the field name and its stale docstring. It is proposed by the ES and kept or rejected on p95 TTFT alone; the calibration/OLS path is not active. us-west4 (H100) is pinned to 1.0 below and is therefore the reference class, so the searched value is a dimensionless ratio reading 'one uncached token on the L40S costs this many H100-equivalent tokens'. Expect >1. Searching a scale for BOTH classes would be over-parameterized by exactly one -- the score's argmin is invariant to positive rescaling -- handing the ES a flat direction to random-walk.\n\nQUEUE TERM: normalized by measured KV headroom, not tied to the prefill ratio and not searched. queue_rate_r = cap_ref/cap_r from each engine's max_total_num_tokens, so the reference lands on 1.0 and queue_weight stays comparable with the homogeneous runs. Tying queue to the prefill ratio would be wrong here: the L40S:2 has 983,549 KV tokens against the H100:1's smaller budget, so it is slower at compute but has MORE headroom -- the two corrections point opposite ways. Capacity is read at runtime, not pinned, because it depends on GPU memory x TP x mem_fraction_static.\n\nNo tuner changes were needed: prefill_rate and queue_rate are already in ALLOWED_HYPERPARAM_KEYS, resolved per-replica by effective_hyperparameters, and GaussianESTuner iterates list(ranges).\n\nwindow/hop raised to 256/64 from the paper's 128/32: a parameter observable only on the traffic hitting one SKU is diluted, so trade ES steps for a less noisy score. Apr 5 has 7,195 requests, leaving ~110 steps against the 34 the homogeneous H100 run used.\n\nreplica_homogeneity_check stays ON with a raised ratio and on_violation=warn: on a mixed fleet its 16 fixed-4k-token warmup probes per replica ARE a direct measurement of the prefill-speed ratio -- the ground truth the ES-learned value is compared against.\n\nLOAD POINT: time_scale=2.0, NOT the paper's 1.0. The v2 attempt at ts=1.0 oversaturated this fleet -- TTFT p95 5,925ms, E2E p95 20.1s, ~61 of 64 client concurrency slots occupied -- so the ES baseline window was measured during pipeline fill and no later window ever beat it. Zero proposals accepted, sigma decayed to the floor, and the tuner pinned the seed weights. In L40S:2-equivalents (H100:1 = 3.81x L40S:2, measured by the homogeneity probe) this fleet is 4.8 units against the paper's 3.0 and the prior 3xH100 run's 11.4; ts=1.0 is a saturated operating point even for the paper's own fleet (their load sweep says so), and 4.8 units is not enough to escape it. ts=2.0 puts this fleet at the paper's ts~3.2 equivalent, under their ts=3.0 unsaturated point, and matches the eval load point so both phases are comparable.\n\nsigma_min lowered 0.05 -> 0.02 and the RNG seeded: at 0.05 a slow start can strand the search at the floor with nothing accepted, which is exactly how v2 died.\n\nRequires REQUEST_TIMING_LOG=1 and GORGO_COMPLETIONS_VOLUME=GORGO-glm5-completions.",
+  "run_id": "prod_c64_costmodel_tune_apr5_hetero",
+  "trace_path": "",
+  "start_delay_seconds": 30,
+  "concurrency": 64,
+  "stream": true,
+  "max_tokens": 128,
+  "max_input_tokens": 24000,
+  "arrival_mode": "open-loop",
+  "time_scale": 2.0,
+  "poll_interval_seconds": 60,
+  "fleet_regions": [
+    "eu-frankfurt-1",
+    "us-west4"
+  ],
+  "policies": [
+    {
+      "name": "gorgo-2d",
+      "label": "gorgo-hillclimb-p95-3d",
+      "hyperparameters": {
+        "rtt_weight": 0.5,
+        "queue_weight": 0.1,
+        "prefill_rate": 1.0,
+        "queue_rate": 1.0
+      },
+      "per_target_hyperparameters_by_region": {
+        "us-west4": {
+          "prefill_rate": 1.0
+        }
+      },
+      "auto_tune": {
+        "enabled": true,
+        "window_size": 256,
+        "hop_size": 64,
+        "apply": true,
+        "mode": "online-es",
+        "objective_metric": "neg_p95_ttft",
+        "hyperparam_ranges": {
+          "rtt_weight": [
+            0.05,
+            2.0
+          ],
+          "queue_weight": [
+            0.05,
+            0.5
+          ],
+          "prefill_rate": [
+            0.5,
+            8.0
+          ]
+        },
+        "sigma": 0.5,
+        "sigma_min": 0.02,
+        "seed": 20260726
+      }
+    }
+  ],
+  "replica_homogeneity_check": {
+    "enabled": true,
+    "warmup_requests_per_replica": 16,
+    "warmup_requests": 4,
+    "prompt_size_tokens": 4000,
+    "max_tokens": 16,
+    "max_ttft_ratio": 100.0,
+    "on_violation": "warn"
+  },
+  "queue_kv_capacity_normalization": {
+    "enabled": true,
+    "reference_region": "us-west4"
+  }
+}

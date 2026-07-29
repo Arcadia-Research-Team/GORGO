@@ -26,6 +26,13 @@ Thumbs.db
 .python-version
 uv.lock
 
+# LaTeX build artifacts
+paper/**/*.aux
+paper/**/*.bbl
+paper/**/*.blg
+paper/**/*.log
+paper/**/*.out
+
 # data
 data/
 

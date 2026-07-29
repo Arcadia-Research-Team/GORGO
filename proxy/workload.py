@@ -729,6 +729,7 @@ async def _send_one(
                 usage_prompt_tokens,
                 usage_completion_tokens,
                 _meta_info,
+                _cached_tokens_actual,
             ) = await consume_sse_stream(resp, request_start_ns=request_start_ns)
             final_output_tokens = (
                 usage_completion_tokens if usage_completion_tokens is not None else output_tokens
