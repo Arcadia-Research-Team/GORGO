@@ -446,17 +446,14 @@ convergence in our 2-dimensional weight space.
 \label{sec:limitations}
 % -----------------------------------------------------------------------
 
-Several constraints bound our conclusions. First, the evaluation rests on a
-single production trace and a homogeneous fleet (three regions, two L40S GPUs
-per replica). GORGO does not currently model heterogeneous hardware setups,
+Several constraints bound our conclusions. First, GORGO does not currently model heterogeneous hardware setups,
 where replicas may have different prefill rates, queueing behavior, or KV-cache
-capacities; generalization to other workloads and replica counts is also
-untested. Second, because the online
+capacities. Second, because the online
 tuner optimizes p95 TTFT, it can exploit continuous batching by concentrating
 load on the nearest replica, trading E2E and ITL tails for TTFT
-(\S\ref{sec:results:hacking}); the queue term mitigates but does not eliminate
-this. Third, we do not consider prefill/decode disaggregation, which introduces
-separate worker queues and KV-transfer costs. Finally, GORGO does not manage or
+(\S\ref{sec:results:hacking}). Adding a lower bound to the queue term mitigates but does not eliminate
+this trade-off. Third, we do not consider prefill/decode disaggregation, which introduces
+KV-transfer cost. Finally, GORGO does not manage or
 directly observe replica-side KV-cache eviction. Consequently, the proxy's
 cache index may temporarily overestimate prefix availability when a cached
 prefix is evicted between routing and execution.
