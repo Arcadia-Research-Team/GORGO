@@ -195,9 +195,7 @@ def multi_ols(
             return [float("nan")] * (dim + 1), float("nan")
         my = sum(ys) / n
         syy = sum((y - my) ** 2 for y in ys)
-        resid = sum(
-            (ys[i] - sum(c * v for c, v in zip(coef, design[i]))) ** 2 for i in range(n)
-        )
+        resid = sum((ys[i] - sum(c * v for c, v in zip(coef, design[i]))) ** 2 for i in range(n))
         return [0.0] + list(coef), (1.0 if syy <= 0 else 1.0 - resid / syy)
 
     design = [[1.0] + [predictors[j][i] for j in range(k)] for i in range(n)]
@@ -217,9 +215,7 @@ def multi_ols(
     syy = sum((y - my) ** 2 for y in ys)
     if syy <= 0:
         return coef, 1.0
-    resid = sum(
-        (ys[i] - sum(c * v for c, v in zip(coef, design[i]))) ** 2 for i in range(n)
-    )
+    resid = sum((ys[i] - sum(c * v for c, v in zip(coef, design[i]))) ** 2 for i in range(n))
     return coef, 1.0 - resid / syy
 
 
@@ -627,7 +623,9 @@ def report_composition(records: list[dict]) -> dict:
     )
 
     print("  per-request share error (percentage points):")
-    print(f"    {'term':9} {'pred p50':>9} {'meas p50':>9} {'|d| p50':>8} {'|d| p95':>8} {'rho':>7}")
+    print(
+        f"    {'term':9} {'pred p50':>9} {'meas p50':>9} {'|d| p50':>8} {'|d| p95':>8} {'rho':>7}"
+    )
     per_term = {}
     for t in _TERMS:
         pv = [row[t] for row in pred_rows]
@@ -706,7 +704,12 @@ def report_form_ceiling(records: list[dict]) -> dict:
 
     out = {}
     for label, preds, names, icept in (
-        ("cost-model form, through origin", [rtts, unc, qd], ["rtt_ms", "uncached", "queued"], False),
+        (
+            "cost-model form, through origin",
+            [rtts, unc, qd],
+            ["rtt_ms", "uncached", "queued"],
+            False,
+        ),
         ("cost-model form + intercept", [rtts, unc, qd], ["rtt_ms", "uncached", "queued"], True),
         (
             "+ prompt_tokens (models ingress)",
@@ -777,8 +780,14 @@ def report_box_reachability(records: list[dict], chosen: dict | None = None) -> 
         rlo, rhi = box["rtt_weight"]
         qlo, qhi = box["queue_weight"]
         n = 300
-        grid_r = [math.exp(math.log(rlo) + (math.log(rhi) - math.log(rlo)) * i / (n - 1)) for i in range(n)]
-        grid_q = [math.exp(math.log(qlo) + (math.log(qhi) - math.log(qlo)) * i / (n - 1)) for i in range(n)]
+        grid_r = [
+            math.exp(math.log(rlo) + (math.log(rhi) - math.log(rlo)) * i / (n - 1))
+            for i in range(n)
+        ]
+        grid_q = [
+            math.exp(math.log(qlo) + (math.log(qhi) - math.log(qlo)) * i / (n - 1))
+            for i in range(n)
+        ]
         best = min(((tv_at(rw, qw), rw, qw) for rw in grid_r for qw in grid_q))
         tv_best, rw, qw = best
         c = _shares({"network": rw * sum_rtt, "prefill": sum_unc, "queue": qw * sum_qd})
@@ -798,7 +807,9 @@ def report_box_reachability(records: list[dict], chosen: dict | None = None) -> 
     inside = (rlo <= rw_star <= rhi) and (qlo <= qw_star <= qhi)
     out["exact_match_inside_paper_box"] = inside
     print(f"  exact-match weights (unbounded): rtt_weight={rw_star:.4g} queue_weight={qw_star:.4g}")
-    print(f"  -> {'INSIDE' if inside else 'OUTSIDE'} the ES box (rtt {rlo}-{rhi}, queue {qlo}-{qhi})")
+    print(
+        f"  -> {'INSIDE' if inside else 'OUTSIDE'} the ES box (rtt {rlo}-{rhi}, queue {qlo}-{qhi})"
+    )
 
     # Whether the box *excludes* the calibrated point is a different question
     # from whether the box is what stopped the optimizer. If the tuner settled
@@ -846,7 +857,11 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
     # predictions still use each request's own weights (predict(rec, None)).
     modal = census["vectors"][0] if census["vectors"] else {}
     deployed = with_defaults(
-        {k: modal[k] for k in ("rtt_weight", "queue_weight", "prefill_rate", "queue_rate") if k in modal}
+        {
+            k: modal[k]
+            for k in ("rtt_weight", "queue_weight", "prefill_rate", "queue_rate")
+            if k in modal
+        }
     )
     physical = fit_physical_rates(records)
 
@@ -967,9 +982,7 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
         summary["components"][label] = comp
 
         # Scale-free check: does the score track TTFT after one affine map?
-        a, b, r2 = ols(
-            [p["ttft_pred_ms"] for p in preds], [r["ttft_ms"] for r in records]
-        )
+        a, b, r2 = ols([p["ttft_pred_ms"] for p in preds], [r["ttft_ms"] for r in records])
         print(
             f"  affine fit TTFT_meas = {a:.1f} + {b:.4f} * score   R^2={r2:.3f}  "
             "(shape-only test; absorbs the unidentifiable score scale)"
@@ -982,8 +995,18 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
 
     # Calibration by request length and by load.
     for bucket_label, key, edges, store in (
-        ("PROMPT LENGTH (uncached tokens)", "uncached_tokens", [1000, 4000, 8000, 16000], "by_prompt_length"),
-        ("LOAD (queued tokens at dispatch)", "queued_tokens", [1000, 10000, 50000, 150000], "by_load"),
+        (
+            "PROMPT LENGTH (uncached tokens)",
+            "uncached_tokens",
+            [1000, 4000, 8000, 16000],
+            "by_prompt_length",
+        ),
+        (
+            "LOAD (queued tokens at dispatch)",
+            "queued_tokens",
+            [1000, 10000, 50000, 150000],
+            "by_load",
+        ),
     ):
         print()
         print("=" * 78)
@@ -1052,7 +1075,9 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
         )
 
         print()
-        print(f"  {'region':>14} {'n':>6} {'rtt_p50':>9} {'resid_p50':>10} {'resid_p95':>10} {'ptok_p50':>9}")
+        print(
+            f"  {'region':>14} {'n':>6} {'rtt_p50':>9} {'resid_p50':>10} {'resid_p95':>10} {'ptok_p50':>9}"
+        )
         by_region: dict[str, list[dict]] = defaultdict(list)
         for r in have_rtt:
             by_region[str(r.get("region"))].append(r)
@@ -1080,7 +1105,9 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
     print("=" * 78)
     print("IS THE RESIDUAL LOAD-DEPENDENT?")
     print("=" * 78)
-    print(f"  resid_ms = {a:.1f} + {b:.4f} * Q_ms    R^2={r2:.3f}  r={pearson(q_vals, resid_vals):.3f}")
+    print(
+        f"  resid_ms = {a:.1f} + {b:.4f} * Q_ms    R^2={r2:.3f}  r={pearson(q_vals, resid_vals):.3f}"
+    )
     print(
         "  A slope near zero would mean the residual is pure network RTT; a positive\n"
         "  slope means part of TTFT grows with load outside both the queue and prefill\n"
@@ -1097,19 +1124,41 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
 
     csv_path = f"{out_prefix}_per_request.csv"
     fields = [
-        "rid", "replica_key", "region", "prompt_tokens", "cached_tokens", "uncached_tokens",
-        "queued_tokens", "rtt_ms", "ttft_ms", "q_meas_ms", "p_meas_ms",
-        "ingress_meas_ms", "resid_meas_ms",
+        "rid",
+        "replica_key",
+        "region",
+        "prompt_tokens",
+        "cached_tokens",
+        "uncached_tokens",
+        "queued_tokens",
+        "rtt_ms",
+        "ttft_ms",
+        "q_meas_ms",
+        "p_meas_ms",
+        "ingress_meas_ms",
+        "resid_meas_ms",
     ]
     # Physical-rate predictions, the weights in force at decision time, the
     # deployed-weight term values, and both share vectors -- everything needed
     # to redo the composition test offline without rerunning this script.
     extra = [
-        "rtt_pred_ms", "q_pred_ms", "p_pred_ms", "ttft_pred_ms",
-        "hp_rtt_weight", "hp_queue_weight", "hp_prefill_rate", "hp_queue_rate",
-        "term_network", "term_prefill", "term_queue",
-        "pred_share_network", "pred_share_prefill", "pred_share_queue",
-        "meas_share_network", "meas_share_prefill", "meas_share_queue",
+        "rtt_pred_ms",
+        "q_pred_ms",
+        "p_pred_ms",
+        "ttft_pred_ms",
+        "hp_rtt_weight",
+        "hp_queue_weight",
+        "hp_prefill_rate",
+        "hp_queue_rate",
+        "term_network",
+        "term_prefill",
+        "term_queue",
+        "pred_share_network",
+        "pred_share_prefill",
+        "pred_share_queue",
+        "meas_share_network",
+        "meas_share_prefill",
+        "meas_share_queue",
     ]
     with open(csv_path, "w") as f:
         f.write(",".join(fields + extra) + "\n")
@@ -1120,11 +1169,23 @@ def report(records: list[dict], skipped: dict, out_prefix: str) -> dict:
             mv = r.get("_meas_terms") or {}
             ps, ms = _shares(pv) if pv else {}, _shares(mv) if mv else {}
             vals = [r.get(k) for k in fields] + [
-                p["rtt_pred_ms"], p["q_pred_ms"], p["p_pred_ms"], p["ttft_pred_ms"],
-                hp["rtt_weight"], hp["queue_weight"], hp["prefill_rate"], hp["queue_rate"],
-                pv.get("network"), pv.get("prefill"), pv.get("queue"),
-                ps.get("network"), ps.get("prefill"), ps.get("queue"),
-                ms.get("network"), ms.get("prefill"), ms.get("queue"),
+                p["rtt_pred_ms"],
+                p["q_pred_ms"],
+                p["p_pred_ms"],
+                p["ttft_pred_ms"],
+                hp["rtt_weight"],
+                hp["queue_weight"],
+                hp["prefill_rate"],
+                hp["queue_rate"],
+                pv.get("network"),
+                pv.get("prefill"),
+                pv.get("queue"),
+                ps.get("network"),
+                ps.get("prefill"),
+                ps.get("queue"),
+                ms.get("network"),
+                ms.get("prefill"),
+                ms.get("queue"),
             ]
             f.write(",".join("" if v is None else str(v) for v in vals) + "\n")
     print(f"[out] wrote {csv_path}")
@@ -1152,7 +1213,11 @@ def plot_tune_trajectory(steps: list[dict], summary: dict, out_prefix: str) -> N
     best = [s.get("best_params") or {} for s in steps]
     rw = [b.get("rtt_weight") for b in best]
     qw = [b.get("queue_weight") for b in best]
-    keep = [i for i in range(len(rw)) if isinstance(rw[i], (int, float)) and isinstance(qw[i], (int, float))]
+    keep = [
+        i
+        for i in range(len(rw))
+        if isinstance(rw[i], (int, float)) and isinstance(qw[i], (int, float))
+    ]
     if not keep:
         print("[plot] tune steps carry no weights; skipping trajectory figure")
         return
@@ -1165,18 +1230,32 @@ def plot_tune_trajectory(steps: list[dict], summary: dict, out_prefix: str) -> N
     rlo, rhi = PAPER_ES_BOX["rtt_weight"]
     qlo, qhi = PAPER_ES_BOX["queue_weight"]
     ax.add_patch(
-        plt.Rectangle((rlo, qlo), rhi - rlo, qhi - qlo, fill=False, ls="--", ec="tab:gray", lw=1.5,
-                      label="ES search box")
+        plt.Rectangle(
+            (rlo, qlo),
+            rhi - rlo,
+            qhi - qlo,
+            fill=False,
+            ls="--",
+            ec="tab:gray",
+            lw=1.5,
+            label="ES search box",
+        )
     )
     ax.plot(rw, qw, "-o", ms=3.5, lw=1, color="tab:blue", alpha=0.8, label="ES best-so-far")
     ax.plot(rw[0], qw[0], "s", ms=9, color="tab:green", label=f"start ({rw[0]:.3g}, {qw[0]:.3g})")
-    ax.plot(rw[-1], qw[-1], "*", ms=16, color="tab:red", label=f"final ({rw[-1]:.3g}, {qw[-1]:.3g})")
+    ax.plot(
+        rw[-1], qw[-1], "*", ms=16, color="tab:red", label=f"final ({rw[-1]:.3g}, {qw[-1]:.3g})"
+    )
 
     reach = summary.get("box_reachability") or {}
     exact = reach.get("exact_match_unbounded") or {}
     if isinstance(exact.get("rtt_weight"), (int, float)):
         ax.plot(
-            exact["rtt_weight"], exact["queue_weight"], "P", ms=13, color="tab:purple",
+            exact["rtt_weight"],
+            exact["queue_weight"],
+            "P",
+            ms=13,
+            color="tab:purple",
             label=f"composition-calibrated ({exact['rtt_weight']:.3g}, {exact['queue_weight']:.3g})",
         )
     ax.set_xscale("log")
@@ -1186,7 +1265,14 @@ def plot_tune_trajectory(steps: list[dict], summary: dict, out_prefix: str) -> N
     ax.set_title("ES weight trajectory vs. search box\nand the composition-calibrated point")
     ax.legend(fontsize=7.5, loc="best")
 
-    ax2.plot(range(len(scores)), scores, "-o", ms=3.5, color="tab:blue", label="best score (neg p95 TTFT, s)")
+    ax2.plot(
+        range(len(scores)),
+        scores,
+        "-o",
+        ms=3.5,
+        color="tab:blue",
+        label="best score (neg p95 TTFT, s)",
+    )
     ax2.set_xlabel("ES step")
     ax2.set_ylabel("best score")
     ax2.legend(fontsize=8, loc="lower right")

@@ -374,14 +374,9 @@ def run_shell(command: str) -> str:
     ``sitecustomize`` already exist? what is PYTHONPATH? which interpreter?)."""
     import subprocess
 
-    proc = subprocess.run(
-        ["bash", "-lc", command], capture_output=True, text=True, timeout=600
-    )
-    return (
-        f"$ {command}\n"
-        f"--- exit={proc.returncode} ---\n"
-        f"{proc.stdout}\n"
-        + (f"--- stderr ---\n{proc.stderr}\n" if proc.stderr.strip() else "")
+    proc = subprocess.run(["bash", "-lc", command], capture_output=True, text=True, timeout=600)
+    return f"$ {command}\n--- exit={proc.returncode} ---\n{proc.stdout}\n" + (
+        f"--- stderr ---\n{proc.stderr}\n" if proc.stderr.strip() else ""
     )
 
 

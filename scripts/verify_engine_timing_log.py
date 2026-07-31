@@ -40,8 +40,10 @@ import modal
 from app import app, bench_results_volume, replicas
 from engine.modal_sglang import HF_REPO_ID, REQUEST_TIMING_LOG_ROOT
 
-VERIFY_IMAGE = modal.Image.debian_slim().pip_install("httpx[http2]").add_local_python_source(
-    "app", "engine", "scripts"
+VERIFY_IMAGE = (
+    modal.Image.debian_slim()
+    .pip_install("httpx[http2]")
+    .add_local_python_source("app", "engine", "scripts")
 )
 
 # Timing fields we require for the decomposition, and the ones that are
@@ -90,9 +92,7 @@ def verify(
     # A long, *unique-per-request* prompt: shared prefixes would let later
     # requests skip prefill and collapse the P we are trying to observe.
     def make_prompt(i: int) -> str:
-        filler = f"seq{run_tag}n{i} " + " ".join(
-            f"w{i}x{j}" for j in range(max(1, prompt_tokens))
-        )
+        filler = f"seq{run_tag}n{i} " + " ".join(f"w{i}x{j}" for j in range(max(1, prompt_tokens)))
         return filler
 
     async def one(client: httpx.AsyncClient, i: int) -> dict:
@@ -236,7 +236,10 @@ def verify(
                 # What the RTT term has to explain: client-observed TTFT less
                 # every engine-local stage we can measure.
                 row["residual_seconds"] = (
-                    r["ttft_seconds"] - q - row["prefill_seconds"] - (row.get("ingress_seconds") or 0.0)
+                    r["ttft_seconds"]
+                    - q
+                    - row["prefill_seconds"]
+                    - (row.get("ingress_seconds") or 0.0)
                 )
             row["present_optional"] = sorted(k for k in OPTIONAL_META_FIELDS if k in meta)
             row["meta_keys"] = sorted(meta.keys())
@@ -257,6 +260,7 @@ def verify(
         flush=True,
     )
     for r in rows:
+
         def fmt(v):
             return f"{v:8.3f}" if isinstance(v, (int, float)) else f"{'-':>8}"
 

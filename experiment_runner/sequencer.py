@@ -138,9 +138,7 @@ def _load_weights_from_volume(output_dir: str) -> dict | None:
 SEQUENCER_IMAGE = (
     modal.Image.debian_slim()
     .pip_install("httpx")
-    .add_local_python_source(
-        "app", "engine", "experiment_runner", "proxy", "scripts", "gorgo"
-    )
+    .add_local_python_source("app", "engine", "experiment_runner", "proxy", "scripts", "gorgo")
 )
 
 

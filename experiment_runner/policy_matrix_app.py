@@ -1844,9 +1844,9 @@ async def _run_policy_matrix_experiment_inner(
     # Runs after the homogeneity probes (so every engine has answered at
     # least once) and before any workload traffic, so no request is scored
     # with an un-normalized queue term.
-    fleet_manifest["queue_kv_capacity_normalization"] = (
-        await _apply_kv_capacity_queue_normalization(fleet_manifest, base_spec)
-    )
+    fleet_manifest[
+        "queue_kv_capacity_normalization"
+    ] = await _apply_kv_capacity_queue_normalization(fleet_manifest, base_spec)
 
     # Write run manifest once the fleet is fully provisioned and validated.
     # Updated again after workloads complete with result paths and timing.

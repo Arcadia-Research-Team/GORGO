@@ -314,9 +314,7 @@ def calibrated_rates_payload(cal: dict) -> dict:
     queue_rate = coef[q_i]
     result["prefill_rate"] = prefill_rate
     result["queue_rate"] = queue_rate
-    result["diagnostics"]["per_replica_intercept_ms"] = {
-        t: coef[i] for i, t in enumerate(targets)
-    }
+    result["diagnostics"]["per_replica_intercept_ms"] = {t: coef[i] for i, t in enumerate(targets)}
     # Negative coefficients are unphysical (collinearity / too little
     # independent variation in this window); surface rather than ship them.
     for name, val in (("prefill_rate", prefill_rate), ("queue_rate", queue_rate)):
@@ -405,9 +403,7 @@ class OnlineTuner:
         if self.mode not in SUPPORTED_AUTO_TUNE_MODES:
             raise ValueError(f"mode must be one of {sorted(SUPPORTED_AUTO_TUNE_MODES)}")
         if self.objective_metric not in ONLINE_SCORE_FUNCTIONS:
-            raise ValueError(
-                f"objective_metric must be one of {sorted(ONLINE_SCORE_FUNCTIONS)}"
-            )
+            raise ValueError(f"objective_metric must be one of {sorted(ONLINE_SCORE_FUNCTIONS)}")
 
     # -- configuration ------------------------------------------------
 
@@ -499,9 +495,7 @@ class OnlineTuner:
             self.hyperparam_ranges = active_ranges
             seed_defaults = current_defaults or DEFAULT_GORGO_HYPERPARAMETERS
             seed = {k: float(seed_defaults.get(k, sum(v) / 2)) for k, v in active_ranges.items()}
-            need_new_tuner = (
-                self.online_tuner is None or was_mode != "online-es" or not was_enabled
-            )
+            need_new_tuner = self.online_tuner is None or was_mode != "online-es" or not was_enabled
             if need_new_tuner:
                 self.online_tuner = GaussianESTuner(
                     initial_params=seed,
@@ -656,9 +650,7 @@ class OnlineTuner:
             "buffered_samples": buffered_samples,
             "samples_since_last_apply": self.samples_since_last_apply,
             "samples_until_next_apply": (
-                max(0, self.hop_size - self.samples_since_last_apply)
-                if self.enabled
-                else None
+                max(0, self.hop_size - self.samples_since_last_apply) if self.enabled else None
             ),
             "applied_count": self.applied_count,
             "last_applied_at_monotonic": self.last_applied_at_monotonic,

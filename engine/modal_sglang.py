@@ -139,7 +139,7 @@ sglang_image = sglang_image.run_commands(
 sglang_image = sglang_image.add_local_file(
     "engine/sglang_timing_patch.py", "/opt/gorgo/sglang_timing_patch.py", copy=True
 ).run_commands(
-    "python3 -c \"import os, site; "
+    'python3 -c "import os, site; '
     "d = site.getsitepackages()[0]; "
     "open(os.path.join(d, 'zz_gorgo_timing_patch.pth'), 'w')"
     ".write('/opt/gorgo\\nimport sglang_timing_patch\\n')\""
@@ -275,9 +275,7 @@ def start_timing_log_committer(log_dir: str | None) -> tuple[threading.Event, ob
     stop = threading.Event()
     if log_dir is None:
         return stop, None
-    thread = threading.Thread(
-        target=_commit_timing_log_periodically, args=(stop,), daemon=True
-    )
+    thread = threading.Thread(target=_commit_timing_log_periodically, args=(stop,), daemon=True)
     thread.start()
     return stop, thread
 

@@ -137,9 +137,7 @@ def test_online_tuner_hop_window_gating_and_apply():
     assert t.applied_count >= 2
     assert t.pending_candidate is not None
     assert set(t.pending_candidate) == {"rtt_weight", "prefill_weight"}
-    assert store["defaults"]["rtt_weight"] == pytest.approx(
-        t.pending_candidate["rtt_weight"]
-    )
+    assert store["defaults"]["rtt_weight"] == pytest.approx(t.pending_candidate["rtt_weight"])
 
 
 def test_online_tuner_ignores_non_gorgo_policy_and_disabled():
