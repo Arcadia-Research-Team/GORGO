@@ -218,6 +218,38 @@ resolution:
 4. The rank validation (§1), rank-region crosstab (§3), and paired
    comparison (§5) demonstrate the induced ordering is empirically correct.
 
+### Worked flip example (WildChat weights, measured physical rates)
+
+Ground truth `T = RTT + 0.07*U + 0.005*Q` (ms; measured H100 rates) vs
+deployed score `S = 2.0*RTT + U + 0.104*Q`. Exchange rates: ground truth
+prices 1 ms of RTT at ~14.3 uncached tokens; the score prices it at 2.0 —
+a ~7x under-pricing of RTT relative to prefill.
+
+Near-but-uncached vs far-but-cached:
+
+| replica | RTT (ms) | uncached U | S (score) | T (ms, truth) |
+|---|---|---|---|---|
+| A: CANADA-2, cache miss | 55 | 840 | 950 | 113.8 |
+| B: sines-2, prefix cached | 245 | 0 | 490 | 245.0 |
+
+The score picks B (gap 460 units); A is actually 131 ms faster. General
+condition at dRTT=190 ms: flips occur for token asymmetry dU in
+(2.0*190, 14.3*190) = (380, ~2,714) tokens. WildChat prompts (~840 tok) sit
+inside this window — the original WildChat failure was this same geometry
+with w_rtt effectively ~0.002 (units bug), which made the window enormous.
+ART-Chat with paper weights under-prices RTT ~129x, but its cache
+asymmetries (~15k tokens) exceed the window's upper bound and near-ties fall
+below it, so flips concentrate in a middle band the workload rarely visits.
+
+Empirical frequency/cost of the tilt (random arm, deployed vs
+physically-calibrated argmin):
+
+- The two models choose the same replica on 73.9% of requests.
+- On disagreements, random dispatches landing on the deployed argmin
+  measured 291 ms mean / 229 p50 TTFT vs 315 / 232 for the physical argmin —
+  the deployed tilt costs nothing where it could have mattered (slightly
+  better on the mean).
+
 ## 8. Derived headline numbers
 
 - Measured TTFT is monotone in predicted rank at every reported percentile.
