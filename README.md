@@ -1,3 +1,5 @@
+
+
 <div align="center">
   <img src="assets/gorgo-logo.png" width="220" alt="GORGO" />
   <p>
@@ -52,7 +54,7 @@ modal run proxy/workload.py --proxy-url https://... \
 Or on Wildchat-4.8M with a specified data path:
 ```bash
 modal run proxy/workload.py --proxy-url https://... \
-  --source hf --data-path /datasets/datasets/allenai__WildChat-4.8M --stream true --num-requests 1000
+  --source hf --data-path /datasets/allenai__WildChat-4.8M --stream true --num-requests 1000
 ```
 
 > Note that the Modal volume names are specified in [app.py](https://github.com/Arcadia-Research-Team/GORGO/blob/main/app.py)
