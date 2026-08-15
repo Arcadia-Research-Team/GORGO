@@ -1,0 +1,5 @@
+Keywords: LLM inference, load balancing, online tuning, evolutionary strategies, network latency, KV-cache, session affinity, prefix cache, time-to-first-token, geo-distributed serving, continuous batching, prefix reuse
+
+TL;DR
+
+GORGO shares a production LLM workload and load-balancing policy for optimizing TTFT and E2E latency in cross-region settings..
