@@ -2,7 +2,7 @@
 
 % ML for Systems @ NeurIPS 2026: non-anonymous, 4-page strict limit
 % (references and appendix do not count). Camera-ready: add ,final
-\usepackage[sglblindworkshop]{neurips_2026}
+\usepackage[dblblindworkshop]{neurips_2026}
 \workshoptitle{Machine Learning for Systems}
 
 \usepackage[utf8]{inputenc}
@@ -144,8 +144,8 @@ two popular LLM datasets derived from public chatbot demos
 a week-long metadata trace of production inference traffic with the same
 prefix-reuse structure as the original workload. We release a replay-ready trace
 in the Mooncake FAST'25 format, which contains per-request timestamps, request
-metadata, and synthetically generated chat completion data~\citep{qin2024mooncake},
-at \href{https://huggingface.co/datasets/alessiotoniolo/ART-Chat-2.5M}{https://huggingface.co/datasets/alessiotoniolo/ART-Chat-2.5M}.
+metadata, and synthetically generated chat completion data~\citep{qin2024mooncake}.
+The dataset is included in the anonymous supplementary material.
 By storing request timestamps, one can linearly scale the time between requests
 to simulate different load profiles for various hardware. Notably, the intra-user prefix reuse and average token length in ART-Chat-2.5M
 are 19$\times$ and 6$\times$ higher than in WildChat-4.8M. Dataset analysis is in Appendix~\ref{app:dataset}.
@@ -257,7 +257,7 @@ To mitigate this, we set a non-zero lower bound for the load-term, which forces 
 \section{Experimental setup}
 \label{app:setup}
 
-Code is available at \href{https://github.com/atoniolo76/GORGO}{https://github.com/atoniolo76/GORGO}.
+Code is included in the anonymous supplementary material.
 
 \paragraph{Proxy and engine configuration.}
 Each policy runs the GORGO proxy on a small CPU worker in us-ashburn and controls
